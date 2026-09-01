@@ -64,4 +64,9 @@ def test_user_temporary_sheet_share_link():
     url = "https://docs.google.com/spreadsheets/d/1LpDcfAjFyqmQ8n7MTmA57T0Dxgff4VgnrsvZSnUIz7Y/edit?usp=drivesdk"
     export = google_sheet_export_url(url)
     assert "1LpDcfAjFyqmQ8n7MTmA57T0Dxgff4VgnrsvZSnUIz7Y" in export
-    assert export.endswith("gid=0")
+    assert "gid=" not in export
+
+
+def test_google_url_without_gid_does_not_force_first_sheet():
+    export = google_sheet_export_url("https://docs.google.com/spreadsheets/d/abc_123/edit?usp=drivesdk")
+    assert export == "https://docs.google.com/spreadsheets/d/abc_123/export?format=csv"

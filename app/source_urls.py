@@ -21,7 +21,9 @@ def google_sheet_export_url(url: str) -> str:
         if gid is None:
             m = re.search(r"gid=(\d+)", parsed.fragment)
             gid = m.group(1) if m else None
-    gid = gid or "0"
-    if not gid.isdigit():
+    if gid is not None and not gid.isdigit():
         raise ValueError("Некорректный gid вкладки")
-    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv&gid={gid}"
+    export_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv"
+    # Если gid не указан, Google сам выберет текущую/основную вкладку.
+    # Принудительный gid=0 может открыть старый скрытый лист.
+    return f"{export_url}&gid={gid}" if gid is not None else export_url
