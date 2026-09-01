@@ -108,12 +108,17 @@ class SyncService:
         if self._lock.locked():
             return {"ok": 0, "failed": 0, "skipped": 1}
         async with self._lock:
-            ok = failed = 0
+            ok = failed = skipped = 0
             for source in await self.db.list_sources(enabled_only=True):
                 try:
                     await self.sync_source(int(source["id"]))
                     ok += 1
                 except Exception:
-                    logger.exception("Source sync failed: %s", source["name"])
-                    failed += 1
-            return {"ok": ok, "failed": failed, "skipped": 0}
+                    updated = await self.db.get_source(int(source["id"]))
+                    if updated and updated["last_status"] == "stale":
+                        logger.info("Source is for another academic year, skipped: %s", source["name"])
+                        skipped += 1
+                    else:
+                        logger.exception("Source sync failed: %s", source["name"])
+                        failed += 1
+            return {"ok": ok, "failed": failed, "skipped": skipped}
