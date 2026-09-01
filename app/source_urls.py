@@ -1,0 +1,27 @@
+from __future__ import annotations
+
+import re
+from urllib.parse import parse_qs, urlparse
+
+SHEET_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
+
+
+def google_sheet_export_url(url: str) -> str:
+    url = url.strip()
+    match = SHEET_RE.search(url)
+    if not match:
+        raise ValueError("Это не похоже на ссылку Google Sheets")
+    spreadsheet_id = match.group(1)
+    parsed = urlparse(url)
+    query = parse_qs(parsed.query)
+    gid = (query.get("gid") or [None])[0]
+    if gid is None and parsed.fragment:
+        frag = parse_qs(parsed.fragment)
+        gid = (frag.get("gid") or [None])[0]
+        if gid is None:
+            m = re.search(r"gid=(\d+)", parsed.fragment)
+            gid = m.group(1) if m else None
+    gid = gid or "0"
+    if not gid.isdigit():
+        raise ValueError("Некорректный gid вкладки")
+    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv&gid={gid}"
