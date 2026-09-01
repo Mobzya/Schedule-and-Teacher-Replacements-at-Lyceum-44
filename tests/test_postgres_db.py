@@ -9,9 +9,11 @@ from app.domain import ParsedLesson, SourceType
 
 @pytest.mark.asyncio
 async def test_postgres_backend_round_trip():
+    if os.getenv("RUN_POSTGRES_INTEGRATION") != "1":
+        pytest.skip("PostgreSQL integration test is disabled")
     database_url = os.getenv("TEST_DATABASE_URL")
     if not database_url:
-        pytest.skip("TEST_DATABASE_URL is not configured")
+        pytest.fail("TEST_DATABASE_URL must point to a disposable database")
 
     db = Database(Path("unused.sqlite"), database_url)
     await db.init()
@@ -32,4 +34,8 @@ async def test_postgres_backend_round_trip():
         [ParsedLesson("10а", None, 0, None, 1, "Алгебра", "316")],
         [],
     )
+    await db.source_status(source_id, "ok", None, "test-hash", success=True)
+    source = await db.get_source(source_id)
+    assert source["last_status"] == "ok"
+    assert source["last_success_at"] is not None
     assert ("10а", None) in await db.classes()

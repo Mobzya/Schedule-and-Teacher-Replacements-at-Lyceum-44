@@ -366,7 +366,7 @@ class Database:
             await db.execute(
                 """UPDATE data_sources SET last_status=?,last_error=?,last_checked_at=?,content_hash=COALESCE(?,content_hash),
                    last_success_at=CASE WHEN ? THEN ? ELSE last_success_at END WHERE id=?""",
-                (status, error, now, content_hash, 1 if success else 0, now, source_id),
+                (status, error, now, content_hash, success, now, source_id),
             )
             await db.commit()
 
