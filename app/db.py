@@ -352,6 +352,17 @@ class Database:
             await db.commit()
         await self.audit(actor_id, "source_enabled", {"source_id": source_id, "enabled": enabled})
 
+    async def disable_sources_by_url_fragment(self, fragment: str, reason: str) -> int:
+        """Disable a known unsafe legacy source while preserving it for inspection."""
+        async with self.connect() as db:
+            cur = await db.execute(
+                """UPDATE data_sources SET enabled=0,last_status='stale',last_error=?
+                   WHERE enabled=1 AND url LIKE ?""",
+                (reason, f"%{fragment}%"),
+            )
+            await db.commit()
+            return max(0, int(cur.rowcount))
+
     async def delete_source(self, source_id: int, actor_id: int | None = None) -> None:
         async with self.connect() as db:
             await db.execute("DELETE FROM data_sources WHERE id=?", (source_id,))

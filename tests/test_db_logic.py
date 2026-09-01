@@ -67,3 +67,25 @@ async def test_new_academic_year_requires_class_selection_again(tmp_path: Path):
     assert user["academic_year"] == "2026-2027"
     assert user["class_name"] is None
     assert user["profile"] is None
+
+
+@pytest.mark.asyncio
+async def test_unsafe_legacy_source_can_be_retired_without_deleting_it(tmp_path: Path):
+    db = Database(tmp_path / "db.sqlite")
+    await db.init()
+    sid = await db.add_source(
+        "legacy replacements",
+        SourceType.REPLACEMENTS,
+        "https://docs.google.com/spreadsheets/d/unsafe-id/edit",
+        10,
+        None,
+        None,
+        "2026-2027",
+        1,
+    )
+
+    assert await db.disable_sources_by_url_fragment("unsafe-id", "ambiguous year") == 1
+    source = await db.get_source(sid)
+    assert not source["enabled"]
+    assert source["last_status"] == "stale"
+    assert source["last_error"] == "ambiguous year"

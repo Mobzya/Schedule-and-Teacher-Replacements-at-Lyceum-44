@@ -26,6 +26,10 @@ class SyncService:
         self._lock = asyncio.Lock()
 
     async def bootstrap(self) -> None:
+        await self.db.disable_sources_by_url_fragment(
+            "1ssv52YzwfZ3S-azlDu49_hyLnF-TMJYf3lo-WbdmvI8",
+            "Старая таблица замен без указания учебного года отключена",
+        )
         for name, url in self.settings.bootstrap_schedule_sources.items():
             await self.db.bootstrap_source(name, SourceType.WEEKLY, url, self.settings.academic_year)
         for name, url in self.settings.bootstrap_replacement_sources.items():
@@ -111,6 +115,10 @@ class SyncService:
                 else:
                     parsed, declared = parse_replacements(text, fallback_year=fallback_year)
                     sheet_date = None
+                    if expected_year and not declared:
+                        raise ValueError(
+                            f"В таблице замен не указан учебный год; добавьте строку «{expected_year} учебный год»"
+                        )
                 self._validate_year(declared, expected_year)
             except ValueError as exc:
                 rejected.append(f"{name}: {exc}")

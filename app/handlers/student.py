@@ -247,7 +247,7 @@ async def set_profile(callback: CallbackQuery, db: Database, settings: Settings)
     _, class_name, idx_s = callback.data.split(":", 2)
     profiles = sorted({p for c, p in await db.classes() if c == class_name and p})
     idx = int(idx_s)
-    if idx >= len(profiles):
+    if idx < 0 or idx >= len(profiles):
         await callback.answer("Список изменился, выберите снова", show_alert=True)
         return
     await db.set_user_class(

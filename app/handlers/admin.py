@@ -180,6 +180,9 @@ async def source_toggle(callback: CallbackQuery, settings: Settings, db: Databas
         return
     sid = int(callback.data.rsplit(":", 1)[1])
     s = await db.get_source(sid)
+    if not s:
+        await callback.answer("Источник уже удалён", show_alert=True)
+        return
     await db.set_source_enabled(sid, not bool(s["enabled"]), callback.from_user.id)
     updated = await db.get_source(sid)
     await callback.message.edit_text(
@@ -246,7 +249,7 @@ async def add_source_start(callback: CallbackQuery, state: FSMContext, settings:
     else:
         await state.set_state(AdminFlow.source_url)
         await callback.message.edit_text(
-            "🔗 Пришлите обычную ссылку Google Sheets. Если нужна конкретная вкладка, откройте её перед копированием ссылки — бот сам извлечёт <code>spreadsheetId</code> и <code>gid</code>.",
+            "🔗 Пришлите обычную ссылку Google Sheets. Ссылка без <code>gid</code> загрузит все подходящие видимые вкладки; ссылка с <code>gid</code> — только одну.",
             parse_mode="HTML",
         )
     await callback.answer()

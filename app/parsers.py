@@ -148,7 +148,7 @@ def parse_weekly_schedule(text: str) -> tuple[list[ParsedLesson], str | None]:
             if col >= len(row):
                 continue
             subject = row[col].strip()
-            if not subject or subject.lower() in {"предмет", "каб", "кабинет"}:
+            if not subject or subject.lower() in {"предмет", "каб", "кабинет", "переход"}:
                 continue
             # Не принимаем повторные служебные ячейки за предмет.
             if subject.lower().replace("ё", "е") in WEEKDAY_NAMES or subject.isdigit():
