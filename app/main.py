@@ -34,7 +34,7 @@ async def sync_worker(sync: SyncService, minutes: int):
 
 async def main():
     settings = load_settings()
-    db = Database(settings.database_path)
+    db = Database(settings.database_path, settings.database_url)
     await db.init()
     if await db.get_state("publication_state") is None:
         await db.set_state("publication_state", "waiting")

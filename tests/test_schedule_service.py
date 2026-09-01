@@ -18,6 +18,7 @@ def settings(path):
     return Settings(
         "",
         frozenset(),
+        None,
         "Europe/Moscow",
         "2026-2027",
         path,

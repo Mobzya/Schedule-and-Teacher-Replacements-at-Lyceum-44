@@ -28,6 +28,7 @@ def _admin_ids() -> frozenset[int]:
 class Settings:
     bot_token: str
     admin_ids: frozenset[int]
+    database_url: str | None
     timezone_name: str
     academic_year: str
     database_path: Path
@@ -53,6 +54,7 @@ def load_settings(require_token: bool = True) -> Settings:
     return Settings(
         bot_token=token,
         admin_ids=_admin_ids(),
+        database_url=os.getenv("DATABASE_URL", "").strip() or None,
         timezone_name=os.getenv("TIMEZONE", "Europe/Moscow"),
         academic_year=os.getenv("ACADEMIC_YEAR", "2026-2027"),
         database_path=db,

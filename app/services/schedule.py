@@ -54,7 +54,7 @@ class ScheduleService:
             # Однодневные источники имеют приоритет над недельными. Внутри типа выбирается source priority.
             cur = await db.execute(
                 """SELECT dl.*,ds.priority FROM dated_lessons dl JOIN data_sources ds ON ds.id=dl.source_id
-                   WHERE ds.enabled=1 AND dl.lesson_date=? AND dl.class_name=? AND dl.profile IS ?
+                   WHERE ds.enabled=1 AND dl.lesson_date=? AND dl.class_name=? AND dl.profile IS NOT DISTINCT FROM ?
                      AND (ds.valid_from IS NULL OR ds.valid_from<=?) AND (ds.valid_until IS NULL OR ds.valid_until>=?)
                    ORDER BY ds.priority DESC, ds.id DESC""",
                 (day.isoformat(), class_name, profile, day.isoformat(), day.isoformat()),
@@ -67,7 +67,7 @@ class ScheduleService:
             if not selected and schedule_weekday is not None:
                 cur = await db.execute(
                     """SELECT wl.*,ds.priority FROM weekly_lessons wl JOIN data_sources ds ON ds.id=wl.source_id
-                       WHERE ds.enabled=1 AND wl.weekday=? AND wl.class_name=? AND wl.profile IS ?
+                       WHERE ds.enabled=1 AND wl.weekday=? AND wl.class_name=? AND wl.profile IS NOT DISTINCT FROM ?
                          AND (ds.valid_from IS NULL OR ds.valid_from<=?) AND (ds.valid_until IS NULL OR ds.valid_until>=?)
                        ORDER BY ds.priority DESC, ds.id DESC""",
                     (schedule_weekday, class_name, profile, day.isoformat(), day.isoformat()),

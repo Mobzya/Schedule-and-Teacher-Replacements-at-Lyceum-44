@@ -11,7 +11,7 @@ from app.db import Database
 
 async def main(old: Path):
     settings = load_settings(require_token=False)
-    db = Database(settings.database_path)
+    db = Database(settings.database_path, settings.database_url)
     await db.init()
     conn = sqlite3.connect(old)
     cur = conn.cursor()

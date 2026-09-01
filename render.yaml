@@ -2,7 +2,7 @@ services:
   - type: web
     name: lyceum44-schedule-bot-v3
     runtime: python
-    plan: starter
+    plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python -m app.main
     healthCheckPath: /health
@@ -11,15 +11,13 @@ services:
         sync: false
       - key: ADMIN_IDS
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: TIMEZONE
         value: Europe/Moscow
       - key: ACADEMIC_YEAR
         value: 2026-2027
       - key: DATABASE_PATH
-        value: /var/data/schedule_v3.db
+        value: ./data/schedule_v3.db
       - key: SOURCE_SYNC_MINUTES
         value: 10
-    disk:
-      name: schedule-data
-      mountPath: /var/data
-      sizeGB: 1

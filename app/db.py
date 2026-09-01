@@ -8,6 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import aiosqlite
+import psycopg
+from psycopg.rows import dict_row
 
 from .domain import ParsedLesson, ParsedReplacement, PublicationState, SourceType
 
@@ -110,12 +112,63 @@ CREATE INDEX IF NOT EXISTS idx_dated_lookup ON dated_lessons(lesson_date,class_n
 CREATE INDEX IF NOT EXISTS idx_replacements_lookup ON replacements(lesson_date,class_name);
 """
 
+POSTGRES_SCHEMA = (
+    SCHEMA.replace("PRAGMA foreign_keys=ON;", "")
+    .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY")
+    .replace(
+        "PRIMARY KEY(source_id,class_name,profile,weekday,lesson_number)",
+        "UNIQUE NULLS NOT DISTINCT(source_id,class_name,profile,weekday,lesson_number)",
+    )
+    .replace(
+        "PRIMARY KEY(source_id,lesson_date,class_name,profile,lesson_number)",
+        "UNIQUE NULLS NOT DISTINCT(source_id,lesson_date,class_name,profile,lesson_number)",
+    )
+)
+
+
+class PostgresConnection:
+    """Small compatibility layer that keeps the repository's SQL backend-neutral."""
+
+    def __init__(self, connection: psycopg.AsyncConnection):
+        self.connection = connection
+
+    @staticmethod
+    def _sql(query: str) -> str:
+        return query.replace("?", "%s")
+
+    async def execute(self, query: str, params: tuple = ()):
+        return await self.connection.execute(self._sql(query), params)
+
+    async def executemany(self, query: str, params: Iterable[tuple]):
+        cursor = self.connection.cursor()
+        await cursor.executemany(self._sql(query), params)
+        return cursor
+
+    async def commit(self) -> None:
+        await self.connection.commit()
+
+    async def rollback(self) -> None:
+        await self.connection.rollback()
+
 
 class Database:
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, database_url: str | None = None):
         self.path = path
+        self.database_url = database_url
+        if database_url and not database_url.startswith(("postgres://", "postgresql://")):
+            raise ValueError("DATABASE_URL must be a PostgreSQL connection string")
 
     async def init(self) -> None:
+        if self.database_url:
+            connection = await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row)
+            try:
+                for statement in POSTGRES_SCHEMA.split(";"):
+                    if statement.strip():
+                        await connection.execute(statement)
+                await connection.commit()
+            finally:
+                await connection.close()
+            return
         self.path.parent.mkdir(parents=True, exist_ok=True)
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA)
@@ -123,7 +176,14 @@ class Database:
             await db.commit()
 
     @asynccontextmanager
-    async def connect(self) -> AsyncIterator[aiosqlite.Connection]:
+    async def connect(self) -> AsyncIterator[Any]:
+        if self.database_url:
+            connection = await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row)
+            try:
+                yield PostgresConnection(connection)
+            finally:
+                await connection.close()
+            return
         db = await aiosqlite.connect(self.path)
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA foreign_keys=ON")
@@ -136,7 +196,7 @@ class Database:
         async with self.connect() as db:
             cur = await db.execute("SELECT value FROM app_state WHERE key=?", (key,))
             row = await cur.fetchone()
-            return row[0] if row else default
+            return row["value"] if row else default
 
     async def set_state(self, key: str, value: str) -> None:
         async with self.connect() as db:
@@ -244,9 +304,12 @@ class Database:
         created_by: int | None,
     ) -> int:
         async with self.connect() as db:
+            query = """INSERT INTO data_sources(name,source_type,url,priority,valid_from,valid_until,expected_academic_year,created_by,created_at)
+                   VALUES(?,?,?,?,?,?,?,?,?)"""
+            if self.database_url:
+                query += " RETURNING id"
             cur = await db.execute(
-                """INSERT INTO data_sources(name,source_type,url,priority,valid_from,valid_until,expected_academic_year,created_by,created_at)
-                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                query,
                 (
                     name,
                     source_type.value,
@@ -259,14 +322,15 @@ class Database:
                     datetime.now(UTC).isoformat(),
                 ),
             )
+            source_id = int((await cur.fetchone())["id"]) if self.database_url else int(cur.lastrowid)
             await db.commit()
-            return int(cur.lastrowid)
+            return source_id
 
     async def bootstrap_source(self, name: str, source_type: SourceType, url: str, expected_year: str | None) -> None:
         async with self.connect() as db:
             await db.execute(
-                """INSERT OR IGNORE INTO data_sources(name,source_type,url,priority,expected_academic_year,created_at)
-                   VALUES(?,?,?,?,?,?)""",
+                """INSERT INTO data_sources(name,source_type,url,priority,expected_academic_year,created_at)
+                   VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING""",
                 (name, source_type.value, url, 10, expected_year, datetime.now(UTC).isoformat()),
             )
             await db.commit()
@@ -314,7 +378,7 @@ class Database:
         replacements: Iterable[ParsedReplacement],
     ) -> None:
         async with self.connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
+            await db.execute("BEGIN" if self.database_url else "BEGIN IMMEDIATE")
             try:
                 if source_type == SourceType.WEEKLY:
                     await db.execute("DELETE FROM weekly_lessons WHERE source_id=?", (source_id,))
@@ -388,7 +452,7 @@ class Database:
             cur = await db.execute("""SELECT DISTINCT class_name,profile FROM weekly_lessons
                                     UNION SELECT DISTINCT class_name,profile FROM dated_lessons
                                     ORDER BY class_name,profile""")
-            return [(r[0], r[1]) for r in await cur.fetchall()]
+            return [(r["class_name"], r["profile"]) for r in await cur.fetchall()]
 
     async def calendar_override(self, day: date):
         async with self.connect() as db:
@@ -429,7 +493,8 @@ class Database:
     async def mark_notification(self, user_id: int, key: str) -> None:
         async with self.connect() as db:
             await db.execute(
-                "INSERT OR IGNORE INTO notification_log(user_id,notification_key,sent_at) VALUES(?,?,?)",
+                """INSERT INTO notification_log(user_id,notification_key,sent_at) VALUES(?,?,?)
+                   ON CONFLICT(user_id,notification_key) DO NOTHING""",
                 (user_id, key, datetime.now(UTC).isoformat()),
             )
             await db.commit()

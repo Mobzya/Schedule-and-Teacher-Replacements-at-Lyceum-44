@@ -193,6 +193,7 @@ BOT_TOKEN=НОВЫЙ_ТОКЕН
 ADMIN_IDS=ВАШ_TELEGRAM_ID
 ACADEMIC_YEAR=2026-2027
 DATABASE_PATH=./data/schedule_v3.db
+DATABASE_URL=
 ```
 
 Telegram ID можно узнать через `/id`.
@@ -236,17 +237,11 @@ python -m scripts.migrate_legacy_db /path/to/old/schedule.db
 9. Нажмите `✅ Опубликовать + уведомить`.
 10. Когда появится постоянная сетка — добавьте её как `Основное расписание` и синхронизируйте.
 
-# Render
+# Render Free
 
-Включён `render.yaml` с persistent disk `/var/data`. Это важно: SQLite без persistent disk исчезнет при пересоздании инстанса.
-
-1. загрузите проект в GitHub;
-2. создайте Blueprint в Render;
-3. задайте secrets `BOT_TOKEN` и `ADMIN_IDS`;
-4. deploy;
-5. откройте `/health`.
-
-Для бесплатного сервиса без persistent disk эта конфигурация не подходит: используйте постоянное хранилище или перенесите БД на внешний сервис.
+`render.yaml` настроен на бесплатный Web Service. В production задайте `DATABASE_URL` внешней PostgreSQL-базы:
+локальная SQLite на Render Free не переживает restart или redeploy. Полная инструкция находится в
+[`docs/render-free-deploy.md`](docs/render-free-deploy.md).
 
 # Тесты и CI
 
