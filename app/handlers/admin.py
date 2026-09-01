@@ -286,7 +286,8 @@ async def source_url(message: Message, state: FSMContext, settings: Settings, sy
         return
     await state.update_data(url=url, preview_count=result["count"], declared_year=result.get("declared_year"))
     date_line = f"\nДата: <b>{result['date'].strftime('%d.%m.%Y')}</b>" if result.get("date") else ""
-    text = f"✅ <b>Источник распознан</b>\n\nТип: <code>{stype.value}</code>\nЗаписей: <b>{result['count']}</b>\nУчебный год в листе: {esc(result.get('declared_year') or 'не указан')}{date_line}\n\nСохранить этот источник?"
+    classes = ", ".join(x.upper() for x in result.get("classes", [])) or "—"
+    text = f"✅ <b>Источник распознан</b>\n\nТип: <code>{stype.value}</code>\nЗаписей: <b>{result['count']}</b>\nКлассы: <b>{esc(classes)}</b>\nУчебный год в листе: {esc(result.get('declared_year') or 'не указан')}{date_line}\n\nСохранить этот источник?"
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
             [

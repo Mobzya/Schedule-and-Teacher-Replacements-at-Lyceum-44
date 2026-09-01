@@ -8,18 +8,21 @@ from .domain import EffectiveLesson
 from .utils import RU_WEEKDAYS, esc
 
 
-def main_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+def main_keyboard(is_admin: bool = False, class_selected: bool = True) -> InlineKeyboardMarkup:
     rows = [
         [
             InlineKeyboardButton(text="📅 Сегодня", callback_data="today"),
             InlineKeyboardButton(text="📆 Неделя", callback_data="week:0"),
         ],
         [
-            InlineKeyboardButton(text="⚡ Изменения", callback_data="changes"),
+            InlineKeyboardButton(text="⚡ Список замен", callback_data="changes"),
             InlineKeyboardButton(text="⚙️ Настройки", callback_data="settings"),
         ],
         [
-            InlineKeyboardButton(text="🎓 Мой класс", callback_data="class:choose"),
+            InlineKeyboardButton(
+                text="🎓 Мой класс" if class_selected else "🎓 Выбрать класс",
+                callback_data="class:choose",
+            ),
             InlineKeyboardButton(text="🔄 Обновить", callback_data="home"),
         ],
     ]
@@ -47,7 +50,8 @@ def lesson_line(lesson: EffectiveLesson) -> str:
     marker = "⚡ " if lesson.changed else ""
     time_text = f" · {lesson.start_time.strftime('%H:%M')}" if lesson.start_time else ""
     room = f" · каб. {esc(lesson.room)}" if lesson.room else ""
-    return f"{marker}<b>{lesson.lesson_number}. {esc(lesson.subject)}</b>{room}{time_text}"
+    teacher = f" · {esc(lesson.teacher)}" if lesson.changed and lesson.teacher else ""
+    return f"{marker}<b>{lesson.lesson_number}. {esc(lesson.subject)}</b>{room}{teacher}{time_text}"
 
 
 def render_day(day: date, class_display: str, info: dict) -> str:

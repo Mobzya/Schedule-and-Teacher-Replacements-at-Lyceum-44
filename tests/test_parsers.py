@@ -70,3 +70,9 @@ def test_user_temporary_sheet_share_link():
 def test_google_url_without_gid_does_not_force_first_sheet():
     export = google_sheet_export_url("https://docs.google.com/spreadsheets/d/abc_123/edit?usp=drivesdk")
     assert export == "https://docs.google.com/spreadsheets/d/abc_123/export?format=csv"
+
+
+def test_date_schedule_ignores_transition_cells():
+    text = """2026-2027 учебный год\n,,5а,каб,5б,каб\nсреда,1,переход,101,Математика,102\n,2,Русский язык,103,Литература,104\n,3,История,105,Биология,106\n"""
+    lessons, _, _ = parse_date_schedule(text, date(2026, 9, 2))
+    assert all(x.subject.lower() != "переход" for x in lessons)

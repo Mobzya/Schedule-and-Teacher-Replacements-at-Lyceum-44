@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import csv
 import hashlib
+import io
 import logging
-from datetime import date
+from datetime import date, datetime
 
 import aiohttp
+from openpyxl import load_workbook
 
 from ..config import Settings
 from ..db import Database
 from ..domain import SourceType
 from ..parsers import parse_date_schedule, parse_replacements, parse_weekly_schedule
-from ..source_urls import google_sheet_export_url
+from ..source_urls import google_sheet_export_url, google_sheet_parts, google_workbook_export_url
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +42,48 @@ class SyncService:
             raise ValueError("Источник слишком большой (>5 MB)")
         return data.decode("utf-8-sig", errors="replace")
 
+    async def fetch_sheets(self, url: str) -> list[tuple[str, str]]:
+        """Fetch one explicitly selected sheet or every visible sheet in a workbook."""
+        _, gid = google_sheet_parts(url)
+        if gid is not None:
+            return [(f"gid={gid}", await self.fetch_text(url))]
+
+        timeout = aiohttp.ClientTimeout(total=60)
+        async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Lyceum44ScheduleBot/3"}) as session:
+            async with session.get(google_workbook_export_url(url)) as response:
+                response.raise_for_status()
+                data = await response.read()
+        if len(data) > 15_000_000:
+            raise ValueError("Файл Google Sheets слишком большой (>15 MB)")
+        return await asyncio.to_thread(self._xlsx_sheets, data)
+
+    @staticmethod
+    def _xlsx_sheets(data: bytes) -> list[tuple[str, str]]:
+        try:
+            workbook = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        except Exception as exc:
+            raise ValueError("Не удалось прочитать книгу Google Sheets") from exc
+        result = []
+        try:
+            for sheet in workbook.worksheets:
+                if sheet.sheet_state != "visible":
+                    continue
+                output = io.StringIO(newline="")
+                writer = csv.writer(output)
+                for row in sheet.iter_rows(values_only=True):
+                    values = []
+                    for value in row:
+                        if isinstance(value, date | datetime):
+                            value = value.strftime("%d.%m.%Y")
+                        elif isinstance(value, float) and value.is_integer():
+                            value = int(value)
+                        values.append("" if value is None else value)
+                    writer.writerow(values)
+                result.append((sheet.title, output.getvalue()))
+        finally:
+            workbook.close()
+        return result
+
     def _validate_year(self, declared: str | None, expected: str | None) -> None:
         if declared and expected and declared != expected:
             raise ValueError(f"В таблице указан учебный год {declared}, ожидается {expected}")
@@ -46,38 +91,61 @@ class SyncService:
     async def preview(
         self, source_type: SourceType, url: str, forced_date: date | None = None, expected_year: str | None = None
     ) -> dict:
-        text = await self.fetch_text(url)
-        digest = hashlib.sha256(text.encode()).hexdigest()
-        if source_type == SourceType.WEEKLY:
-            lessons, declared = parse_weekly_schedule(text)
-            self._validate_year(declared, expected_year)
-            return {
-                "lessons": lessons,
-                "replacements": [],
-                "declared_year": declared,
-                "hash": digest,
-                "count": len(lessons),
-            }
-        if source_type == SourceType.DATE:
-            lessons, declared, parsed_date = parse_date_schedule(text, forced_date)
-            self._validate_year(declared, expected_year)
-            return {
-                "lessons": lessons,
-                "replacements": [],
-                "declared_year": declared,
-                "hash": digest,
-                "count": len(lessons),
-                "date": parsed_date,
-            }
+        sheets = await self.fetch_sheets(url)
+        digest = hashlib.sha256("\n".join(f"{name}\n{text}" for name, text in sheets).encode()).hexdigest()
+        lessons = []
+        replacements = []
+        declared_years = set()
+        parsed_date = forced_date
+        rejected = []
+        accepted = 0
         fallback_year = int(self.settings.academic_year.split("-")[0])
-        replacements, declared = parse_replacements(text, fallback_year=fallback_year)
-        self._validate_year(declared, expected_year)
+
+        for name, text in sheets:
+            try:
+                if source_type == SourceType.WEEKLY:
+                    parsed, declared = parse_weekly_schedule(text)
+                    sheet_date = None
+                elif source_type == SourceType.DATE:
+                    parsed, declared, sheet_date = parse_date_schedule(text, forced_date)
+                else:
+                    parsed, declared = parse_replacements(text, fallback_year=fallback_year)
+                    sheet_date = None
+                self._validate_year(declared, expected_year)
+            except ValueError as exc:
+                rejected.append(f"{name}: {exc}")
+                continue
+            if declared:
+                declared_years.add(declared)
+            accepted += 1
+            if source_type == SourceType.REPLACEMENTS:
+                replacements.extend(parsed)
+            else:
+                lessons.extend(parsed)
+                parsed_date = parsed_date or sheet_date
+
+        if not accepted:
+            year_error = next((x.split(": ", 1)[1] for x in rejected if "В таблице указан учебный год" in x), None)
+            if year_error:
+                raise ValueError(year_error)
+            details = "; ".join(rejected[:4])
+            raise ValueError(f"Ни одна вкладка не подошла. {details}".strip())
+
+        if source_type == SourceType.REPLACEMENTS:
+            replacements = list({(x.lesson_date, x.class_name, x.lesson_number): x for x in replacements}.values())
+        else:
+            lessons = list(
+                {(x.class_name, x.profile, x.weekday, x.lesson_date, x.lesson_number): x for x in lessons}.values()
+            )
+        declared = expected_year if expected_year in declared_years else next(iter(declared_years), None)
         return {
-            "lessons": [],
+            "lessons": lessons,
             "replacements": replacements,
             "declared_year": declared,
             "hash": digest,
-            "count": len(replacements),
+            "count": len(replacements) if source_type == SourceType.REPLACEMENTS else len(lessons),
+            "classes": sorted({x.class_name for x in (*lessons, *replacements)}),
+            **({"date": parsed_date} if source_type == SourceType.DATE else {}),
         }
 
     async def sync_source(self, source_id: int) -> dict:

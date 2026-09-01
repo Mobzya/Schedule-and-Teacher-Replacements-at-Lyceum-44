@@ -189,7 +189,7 @@ def parse_date_schedule(text: str, forced_date: date | None = None) -> tuple[lis
             if col >= len(row):
                 continue
             subject = row[col].strip()
-            if not subject or subject.lower() in {"предмет", "каб", "кабинет"} or subject.isdigit():
+            if not subject or subject.lower() in {"предмет", "каб", "кабинет", "переход"} or subject.isdigit():
                 continue
             if subject.lower().replace("ё", "е") in WEEKDAY_NAMES:
                 continue

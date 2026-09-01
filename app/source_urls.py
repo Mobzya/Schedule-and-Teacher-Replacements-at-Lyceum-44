@@ -6,7 +6,7 @@ from urllib.parse import parse_qs, urlparse
 SHEET_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9_-]+)")
 
 
-def google_sheet_export_url(url: str) -> str:
+def google_sheet_parts(url: str) -> tuple[str, str | None]:
     url = url.strip()
     match = SHEET_RE.search(url)
     if not match:
@@ -23,7 +23,17 @@ def google_sheet_export_url(url: str) -> str:
             gid = m.group(1) if m else None
     if gid is not None and not gid.isdigit():
         raise ValueError("Некорректный gid вкладки")
+    return spreadsheet_id, gid
+
+
+def google_sheet_export_url(url: str) -> str:
+    spreadsheet_id, gid = google_sheet_parts(url)
     export_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=csv"
     # Если gid не указан, Google сам выберет текущую/основную вкладку.
     # Принудительный gid=0 может открыть старый скрытый лист.
     return f"{export_url}&gid={gid}" if gid is not None else export_url
+
+
+def google_workbook_export_url(url: str) -> str:
+    spreadsheet_id, _ = google_sheet_parts(url)
+    return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=xlsx"

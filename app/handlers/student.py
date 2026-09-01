@@ -41,13 +41,7 @@ async def render_home(
             "✅ Расписание опубликовано.\n"
             "Чтобы показывать только ваши уроки и присылать правильные уведомления, выберите актуальный класс."
         )
-        kb = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="🎓 Выбрать класс", callback_data="class:choose")],
-                *main_keyboard(_is_admin(settings, user_id)).inline_keyboard,
-            ]
-        )
-        return text, kb
+        return text, main_keyboard(_is_admin(settings, user_id), class_selected=False)
     now = now_local(settings.timezone)
     current, nxt, info = await schedules.current_and_next(user["class_name"], user["profile"], now)
     class_display = _class_display(user)
@@ -144,7 +138,7 @@ async def week(callback: CallbackQuery, db: Database, settings: Settings, schedu
         )
         await callback.answer()
         return
-    if not user or not user["class_name"]:
+    if not user or not user["class_name"] or user["academic_year"] != settings.academic_year:
         await callback.answer("Сначала выберите класс", show_alert=True)
         return
     offset = max(-8, min(8, int(callback.data.split(":", 1)[1])))
@@ -185,7 +179,7 @@ async def changes(callback: CallbackQuery, db: Database, settings: Settings, sch
         )
         await callback.answer()
         return
-    if not user or not user["class_name"]:
+    if not user or not user["class_name"] or user["academic_year"] != settings.academic_year:
         await callback.answer("Сначала выберите класс", show_alert=True)
         return
     today = now_local(settings.timezone).date()
@@ -196,7 +190,7 @@ async def changes(callback: CallbackQuery, db: Database, settings: Settings, sch
         changed = [x for x in info.get("lessons", []) if x.changed]
         if changed:
             found.append((day, changed))
-    parts = ["⚡ <b>Изменения для вашего класса</b>"]
+    parts = ["⚡ <b>Список замен для вашего класса</b>"]
     if not found:
         parts += ["", "На ближайшие 14 дней опубликованных изменений нет."]
     for day, lessons in found:
