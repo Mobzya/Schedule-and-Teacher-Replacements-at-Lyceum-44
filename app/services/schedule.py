@@ -60,6 +60,17 @@ class ScheduleService:
                 (day.isoformat(), class_name, profile, day.isoformat(), day.isoformat()),
             )
             dated = await cur.fetchall()
+            if not dated:
+                cur = await db.execute(
+                    """SELECT dl.*,ds.priority FROM dated_lessons dl JOIN data_sources ds ON ds.id=dl.source_id
+                       WHERE ds.enabled=1 AND dl.lesson_date=? AND dl.class_name=?
+                         AND (ds.valid_from IS NULL OR ds.valid_from<=?) AND (ds.valid_until IS NULL OR ds.valid_until>=?)
+                       ORDER BY ds.priority DESC, ds.id DESC""",
+                    (day.isoformat(), class_name, day.isoformat(), day.isoformat()),
+                )
+                candidates = await cur.fetchall()
+                if len({r["profile"] for r in candidates}) == 1:
+                    dated = candidates
             selected: dict[int, Any] = {}
             for r in dated:
                 selected.setdefault(int(r["lesson_number"]), r)
@@ -72,7 +83,20 @@ class ScheduleService:
                        ORDER BY ds.priority DESC, ds.id DESC""",
                     (schedule_weekday, class_name, profile, day.isoformat(), day.isoformat()),
                 )
-                for r in await cur.fetchall():
+                weekly = await cur.fetchall()
+                if not weekly:
+                    cur = await db.execute(
+                        """SELECT wl.*,ds.priority FROM weekly_lessons wl JOIN data_sources ds ON ds.id=wl.source_id
+                           WHERE ds.enabled=1 AND wl.weekday=? AND wl.class_name=?
+                             AND (ds.valid_from IS NULL OR ds.valid_from<=?)
+                             AND (ds.valid_until IS NULL OR ds.valid_until>=?)
+                           ORDER BY ds.priority DESC, ds.id DESC""",
+                        (schedule_weekday, class_name, day.isoformat(), day.isoformat()),
+                    )
+                    candidates = await cur.fetchall()
+                    if len({r["profile"] for r in candidates}) == 1:
+                        weekly = candidates
+                for r in weekly:
                     selected.setdefault(int(r["lesson_number"]), r)
 
             cur = await db.execute(

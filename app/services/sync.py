@@ -18,6 +18,10 @@ from ..source_urls import google_sheet_export_url, google_sheet_parts, google_wo
 
 logger = logging.getLogger(__name__)
 
+OFFICIAL_SCHEDULE_NAME = "official-2026-2027"
+OFFICIAL_SCHEDULE_ID = "1yFbLC3cXH_Xuci_VBvxGKt9n6_QZpmTg"
+OFFICIAL_SCHEDULE_URL = f"https://docs.google.com/spreadsheets/d/{OFFICIAL_SCHEDULE_ID}/edit?usp=drivesdk"
+
 
 class SyncService:
     def __init__(self, db: Database, settings: Settings):
@@ -26,14 +30,31 @@ class SyncService:
         self._lock = asyncio.Lock()
 
     async def bootstrap(self) -> None:
-        await self.db.disable_sources_by_url_fragment(
-            "1ssv52YzwfZ3S-azlDu49_hyLnF-TMJYf3lo-WbdmvI8",
-            "Старая таблица замен без указания учебного года отключена",
-        )
         for name, url in self.settings.bootstrap_schedule_sources.items():
             await self.db.bootstrap_source(name, SourceType.WEEKLY, url, self.settings.academic_year)
         for name, url in self.settings.bootstrap_replacement_sources.items():
             await self.db.bootstrap_source(name, SourceType.REPLACEMENTS, url, self.settings.academic_year)
+        await self.db.disable_sources_by_url_fragment(
+            "1ssv52YzwfZ3S-azlDu49_hyLnF-TMJYf3lo-WbdmvI8",
+            "Старая таблица замен без указания учебного года отключена",
+        )
+        await self.db.disable_sources_by_url_fragment(
+            "1u117ewxXm5KavaFK2y2UFSOV8Qn5AejrXzNeUG3aIOs",
+            "Источник прошлого учебного года отключён после публикации итогового расписания",
+        )
+        sources = await self.db.list_sources()
+        official_exists = any(
+            OFFICIAL_SCHEDULE_ID in source["url"] and source["source_type"] == SourceType.WEEKLY.value
+            for source in sources
+        )
+        if self.settings.academic_year == "2026-2027" and not official_exists:
+            await self.db.bootstrap_source(
+                OFFICIAL_SCHEDULE_NAME,
+                SourceType.WEEKLY,
+                OFFICIAL_SCHEDULE_URL,
+                self.settings.academic_year,
+                priority=200,
+            )
 
     async def fetch_text(self, url: str) -> str:
         export_url = google_sheet_export_url(url)
@@ -172,6 +193,10 @@ class SyncService:
             # но только если он относится к ожидаемому году или не декларирует год вообще.
             if source_type in (SourceType.WEEKLY, SourceType.DATE) and preview["count"] == 0:
                 raise ValueError("Источник не содержит расписания")
+            if source["last_status"] == "ok" and source["content_hash"] == preview["hash"]:
+                await self.db.source_status(source_id, "ok", None, preview["hash"], True)
+                preview["unchanged"] = True
+                return preview
             await self.db.replace_source_snapshot(source_id, source_type, preview["lessons"], preview["replacements"])
             await self.db.source_status(source_id, "ok", None, preview["hash"], True)
             return preview

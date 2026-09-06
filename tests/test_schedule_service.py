@@ -59,3 +59,45 @@ async def test_waiting_hides_snapshots_and_date_overrides_weekly(tmp_path: Path)
     lesson = ready["lessons"][0]
     assert lesson.subject == "Физика" and lesson.room == "305" and lesson.changed
     assert lesson.start_time.strftime("%H:%M") == "08:15"
+
+
+@pytest.mark.asyncio
+async def test_stale_saved_profile_falls_back_to_only_current_profile(tmp_path: Path):
+    db = Database(tmp_path / "db.sqlite")
+    await db.init()
+    st = settings(tmp_path / "db.sqlite")
+    weekly = await db.add_source("final", SourceType.WEEKLY, "x", 100, None, None, "2026-2027", 1)
+    await db.replace_source_snapshot(
+        weekly,
+        SourceType.WEEKLY,
+        [ParsedLesson("11а", "тех", 0, None, 1, "Алгебра", "316")],
+        [],
+    )
+    await db.set_publication_state(PublicationState.READY, 1)
+
+    info = await ScheduleService(db, st, FakeCalendar()).day_schedule("11а", "ест", date(2026, 9, 7))
+
+    assert info["state"] == "ready"
+    assert info["lessons"][0].subject == "Алгебра"
+
+
+@pytest.mark.asyncio
+async def test_profile_fallback_is_not_used_when_class_has_multiple_profiles(tmp_path: Path):
+    db = Database(tmp_path / "db.sqlite")
+    await db.init()
+    st = settings(tmp_path / "db.sqlite")
+    weekly = await db.add_source("profiles", SourceType.WEEKLY, "x", 100, None, None, "2026-2027", 1)
+    await db.replace_source_snapshot(
+        weekly,
+        SourceType.WEEKLY,
+        [
+            ParsedLesson("10а", "тех", 0, None, 1, "Физика", "304"),
+            ParsedLesson("10а", "соц", 0, None, 1, "История", "103"),
+        ],
+        [],
+    )
+    await db.set_publication_state(PublicationState.READY, 1)
+
+    info = await ScheduleService(db, st, FakeCalendar()).day_schedule("10а", "старый", date(2026, 9, 7))
+
+    assert info["state"] == "no_class_data"

@@ -109,6 +109,7 @@ CREATE TABLE IF NOT EXISTS audit_log(
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_dated_lookup ON dated_lessons(lesson_date,class_name);
+CREATE INDEX IF NOT EXISTS idx_weekly_lookup ON weekly_lessons(weekday,class_name);
 CREATE INDEX IF NOT EXISTS idx_replacements_lookup ON replacements(lesson_date,class_name);
 """
 
@@ -326,12 +327,14 @@ class Database:
             await db.commit()
             return source_id
 
-    async def bootstrap_source(self, name: str, source_type: SourceType, url: str, expected_year: str | None) -> None:
+    async def bootstrap_source(
+        self, name: str, source_type: SourceType, url: str, expected_year: str | None, priority: int = 10
+    ) -> None:
         async with self.connect() as db:
             await db.execute(
                 """INSERT INTO data_sources(name,source_type,url,priority,expected_academic_year,created_at)
                    VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING""",
-                (name, source_type.value, url, 10, expected_year, datetime.now(UTC).isoformat()),
+                (name, source_type.value, url, priority, expected_year, datetime.now(UTC).isoformat()),
             )
             await db.commit()
 
@@ -460,8 +463,12 @@ class Database:
 
     async def classes(self) -> list[tuple[str, str | None]]:
         async with self.connect() as db:
-            cur = await db.execute("""SELECT DISTINCT class_name,profile FROM weekly_lessons
-                                    UNION SELECT DISTINCT class_name,profile FROM dated_lessons
+            cur = await db.execute("""SELECT DISTINCT wl.class_name,wl.profile
+                                      FROM weekly_lessons wl JOIN data_sources ds ON ds.id=wl.source_id
+                                      WHERE ds.enabled=1
+                                    UNION SELECT DISTINCT dl.class_name,dl.profile
+                                      FROM dated_lessons dl JOIN data_sources ds ON ds.id=dl.source_id
+                                      WHERE ds.enabled=1
                                     ORDER BY class_name,profile""")
             return [(r["class_name"], r["profile"]) for r in await cur.fetchall()]
 

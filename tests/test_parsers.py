@@ -76,3 +76,10 @@ def test_date_schedule_ignores_transition_cells():
     text = """2026-2027 учебный год\n,,5а,каб,5б,каб\nсреда,1,переход,101,Математика,102\n,2,Русский язык,103,Литература,104\n,3,История,105,Биология,106\n"""
     lessons, _, _ = parse_date_schedule(text, date(2026, 9, 2))
     assert all(x.subject.lower() != "переход" for x in lessons)
+
+
+def test_weekly_schedule_ignores_transition_cells():
+    text = """2026-2027 учебный год\n,,5а,каб\nпонедельник,1,Переход,101\n,2,Русский язык,103\n,3,История,105\n,4,Математика,106\n,5,Биология,107\n,6,Музыка,108\n"""
+    lessons, _ = parse_weekly_schedule(text)
+    assert len(lessons) == 5
+    assert all(x.subject.lower() != "переход" for x in lessons)

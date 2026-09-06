@@ -89,3 +89,20 @@ async def test_unsafe_legacy_source_can_be_retired_without_deleting_it(tmp_path:
     assert not source["enabled"]
     assert source["last_status"] == "stale"
     assert source["last_error"] == "ambiguous year"
+
+
+@pytest.mark.asyncio
+async def test_disabled_source_classes_are_not_offered(tmp_path: Path):
+    db = Database(tmp_path / "db.sqlite")
+    await db.init()
+    active = await db.add_source("active", SourceType.WEEKLY, "x", 100, None, None, "2026-2027", 1)
+    disabled = await db.add_source("disabled", SourceType.WEEKLY, "y", 100, None, None, "2026-2027", 1)
+    await db.replace_source_snapshot(
+        active, SourceType.WEEKLY, [ParsedLesson("10а", None, 0, None, 1, "Алгебра", "1")], []
+    )
+    await db.replace_source_snapshot(
+        disabled, SourceType.WEEKLY, [ParsedLesson("6а", None, 0, None, 1, "Музыка", "2")], []
+    )
+    await db.set_source_enabled(disabled, False)
+
+    assert await db.classes() == [("10а", None)]
