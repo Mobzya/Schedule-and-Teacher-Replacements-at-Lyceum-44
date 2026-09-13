@@ -6,7 +6,7 @@ import re
 from datetime import date
 
 from .domain import ParsedLesson, ParsedReplacement
-from .utils import normalize_class_name
+from .utils import academic_year_for, normalize_class_name
 
 WEEKDAY_NAMES = {
     "понедельник": 0,
@@ -28,6 +28,34 @@ ACADEMIC_YEAR_RE = re.compile(r"(20\d{2})\s*[-–—/]\s*(20\d{2})")
 CLASS_RE = re.compile(r"^\s*(\d{1,2})\s*([а-яёa-z])\s*(?:\(([^)]+)\))?\s*$", re.I)
 FULL_DATE_RE = re.compile(r"(?<!\d)(\d{1,2})[./](\d{1,2})[./](20\d{2})(?!\d)")
 SHORT_DATE_RE = re.compile(r"^\s*(\d{1,2})[./](\d{1,2})\s*$")
+TEXT_MONTH_DATE_RE = re.compile(r"^\s*(\d{1,2})[.\s/-]+([\wа-яё]+)\.?\s*$", re.I)
+RU_MONTHS = {
+    "янв": 1,
+    "январь": 1,
+    "фев": 2,
+    "февраль": 2,
+    "мар": 3,
+    "март": 3,
+    "апр": 4,
+    "апрель": 4,
+    "май": 5,
+    "мая": 5,
+    "июн": 6,
+    "июнь": 6,
+    "июл": 7,
+    "июль": 7,
+    "авг": 8,
+    "август": 8,
+    "сен": 9,
+    "сент": 9,
+    "сентябрь": 9,
+    "окт": 10,
+    "октябрь": 10,
+    "ноя": 11,
+    "ноябрь": 11,
+    "дек": 12,
+    "декабрь": 12,
+}
 
 
 def read_csv(text: str) -> list[list[str]]:
@@ -42,6 +70,19 @@ def declared_academic_year(rows: list[list[str]]) -> str | None:
         if m:
             return f"{m.group(1)}-{m.group(2)}"
     return None
+
+
+def explicit_date_academic_years(text: str) -> set[str]:
+    """Return academic years proven by full dates printed in a sheet."""
+    years = set()
+    for row in read_csv(text):
+        for match in FULL_DATE_RE.finditer(" ".join(row)):
+            try:
+                parsed = date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+            except ValueError:
+                continue
+            years.add(academic_year_for(parsed))
+    return years
 
 
 def _class_columns(rows: list[list[str]]) -> tuple[int, list[tuple[int, str, str | None]]]:
@@ -257,16 +298,28 @@ def parse_replacements(text: str, fallback_year: int | None = None) -> tuple[lis
         parsed_date = None
         m = FULL_DATE_RE.search(raw_date)
         if m:
-            parsed_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            try:
+                parsed_date = date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+            except ValueError:
+                parsed_date = None
         else:
             sm = SHORT_DATE_RE.match(raw_date)
+            tm = TEXT_MONTH_DATE_RE.match(raw_date)
+            day = month = None
             if sm:
                 day, month = int(sm.group(1)), int(sm.group(2))
+            elif tm:
+                day = int(tm.group(1))
+                month = RU_MONTHS.get(tm.group(2).lower().replace("ё", "е"))
+            if day is not None and month is not None:
                 y = month_year.get(month) or (
                     (fallback_year + 1) if fallback_year is not None and month <= 7 else fallback_year
                 )
                 if y:
-                    parsed_date = date(y, month, day)
+                    try:
+                        parsed_date = date(y, month, day)
+                    except ValueError:
+                        parsed_date = None
         if parsed_date is None:
             continue
         subject = row[subject_i].strip() if subject_i is not None and subject_i < len(row) else None

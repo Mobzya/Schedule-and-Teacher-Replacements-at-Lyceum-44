@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from app.config import Settings
 from app.db import Database
 from app.domain import ParsedLesson, SourceType
-from app.services.sync import SyncService
+from app.services.sync import OFFICIAL_REPLACEMENTS_ID, SyncService
 
 
 def test_xlsx_sheets_reads_visible_tabs_and_integral_numbers():
@@ -62,6 +62,25 @@ async def test_replacements_without_explicit_year_are_rejected(tmp_path: Path, m
 
 
 @pytest.mark.asyncio
+async def test_replacements_year_can_be_proven_by_full_date_sections(tmp_path: Path, monkeypatch):
+    service = SyncService(Database(tmp_path / "db.sqlite"), _settings(tmp_path / "db.sqlite"))
+    replacements = """дата,урок,класс,предмет
+14.09.2026 понедельник,,,
+14.сен,1,5а,Математика
+"""
+
+    async def fake_fetch(_url):
+        return [("замены", replacements)]
+
+    monkeypatch.setattr(service, "fetch_sheets", fake_fetch)
+    result = await service.preview(SourceType.REPLACEMENTS, "unused", None, "2026-2027")
+
+    assert result["count"] == 1
+    assert result["declared_year"] == "2026-2027"
+    assert result["replacements"][0].lesson_date == date(2026, 9, 14)
+
+
+@pytest.mark.asyncio
 async def test_bootstrap_adds_official_schedule_and_retires_legacy(tmp_path: Path):
     path = tmp_path / "db.sqlite"
     base = _settings(path)
@@ -88,8 +107,10 @@ async def test_bootstrap_adds_official_schedule_and_retires_legacy(tmp_path: Pat
     sources = await db.list_sources()
 
     official = [source for source in sources if source["name"] == "official-2026-2027"]
+    replacements = [source for source in sources if OFFICIAL_REPLACEMENTS_ID in source["url"]]
     legacy = [source for source in sources if source["name"] == "legacy"]
     assert len(official) == 1 and official[0]["enabled"]
+    assert len(replacements) == 1 and replacements[0]["enabled"]
     assert len(legacy) == 1 and not legacy[0]["enabled"]
 
 

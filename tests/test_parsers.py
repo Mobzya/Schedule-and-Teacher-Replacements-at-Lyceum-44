@@ -1,6 +1,13 @@
 from datetime import date
 
-from app.parsers import declared_academic_year, parse_date_schedule, parse_replacements, parse_weekly_schedule, read_csv
+from app.parsers import (
+    declared_academic_year,
+    explicit_date_academic_years,
+    parse_date_schedule,
+    parse_replacements,
+    parse_weekly_schedule,
+    read_csv,
+)
 from app.source_urls import google_sheet_export_url
 
 WEEKLY = """Расписание учебных занятий,,,,,,,,\nна 2026-2027 учебный год,,,,,,,,\n,,9а,каб,9е,каб,,,,9ю,каб\nпонедельник,,,,,,,,,,\n,1,Алгебра,316,Физика,301,,,1,Литература,210\n,2,Русский язык,211,Химия,305,,,2,История,104\nвторник,,,,,,,,,,\n,1,Биология,306,География,209,,,1,Физика,301\n"""
@@ -37,6 +44,20 @@ def test_replacements_short_date_academic_year_boundary():
     assert any(x.lesson_date == date(2026, 9, 2) and x.lesson_number == 2 for x in repl)
     assert any(x.lesson_date == date(2027, 1, 10) and x.lesson_number == 4 for x in repl)
     assert any(x.lesson_number == 3 and x.cancelled for x in repl)
+
+
+def test_replacements_support_russian_month_and_year_section():
+    text = """дата,урок,Класс,Предмет,Заменяющий учитель,Кабинет
+14.09.2026 понедельник,,,,,
+14.сен,4,11а,Информатика,Мулюкова А. В.,301
+"""
+    replacements, year = parse_replacements(text, fallback_year=2026)
+
+    assert year is None
+    assert explicit_date_academic_years(text) == {"2026-2027"}
+    assert len(replacements) == 1
+    assert replacements[0].lesson_date == date(2026, 9, 14)
+    assert replacements[0].teacher == "Мулюкова А. В."
 
 
 def test_google_url_conversion_query_and_fragment():

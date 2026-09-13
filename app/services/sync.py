@@ -13,7 +13,7 @@ from openpyxl import load_workbook
 from ..config import Settings
 from ..db import Database
 from ..domain import SourceType
-from ..parsers import parse_date_schedule, parse_replacements, parse_weekly_schedule
+from ..parsers import explicit_date_academic_years, parse_date_schedule, parse_replacements, parse_weekly_schedule
 from ..source_urls import google_sheet_export_url, google_sheet_parts, google_workbook_export_url
 
 logger = logging.getLogger(__name__)
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 OFFICIAL_SCHEDULE_NAME = "official-2026-2027"
 OFFICIAL_SCHEDULE_ID = "1yFbLC3cXH_Xuci_VBvxGKt9n6_QZpmTg"
 OFFICIAL_SCHEDULE_URL = f"https://docs.google.com/spreadsheets/d/{OFFICIAL_SCHEDULE_ID}/edit?usp=drivesdk"
+OFFICIAL_REPLACEMENTS_NAME = "official-replacements-2026-2027"
+OFFICIAL_REPLACEMENTS_ID = "1bZlIyg9_0JYLnN2WTD3SMxg4zHWe-PaqWDGYnZV1hEg"
+OFFICIAL_REPLACEMENTS_URL = f"https://docs.google.com/spreadsheets/d/{OFFICIAL_REPLACEMENTS_ID}/edit?gid=1372611677"
 
 
 class SyncService:
@@ -52,6 +55,18 @@ class SyncService:
                 OFFICIAL_SCHEDULE_NAME,
                 SourceType.WEEKLY,
                 OFFICIAL_SCHEDULE_URL,
+                self.settings.academic_year,
+                priority=200,
+            )
+        replacements_exist = any(
+            OFFICIAL_REPLACEMENTS_ID in source["url"] and source["source_type"] == SourceType.REPLACEMENTS.value
+            for source in sources
+        )
+        if self.settings.academic_year == "2026-2027" and not replacements_exist:
+            await self.db.bootstrap_source(
+                OFFICIAL_REPLACEMENTS_NAME,
+                SourceType.REPLACEMENTS,
+                OFFICIAL_REPLACEMENTS_URL,
                 self.settings.academic_year,
                 priority=200,
             )
@@ -137,9 +152,15 @@ class SyncService:
                     parsed, declared = parse_replacements(text, fallback_year=fallback_year)
                     sheet_date = None
                     if expected_year and not declared:
-                        raise ValueError(
-                            f"В таблице замен не указан учебный год; добавьте строку «{expected_year} учебный год»"
-                        )
+                        date_years = explicit_date_academic_years(text)
+                        if date_years == {expected_year}:
+                            declared = expected_year
+                        else:
+                            found = ", ".join(sorted(date_years)) or "не найден"
+                            raise ValueError(
+                                "В таблице замен не указан учебный год, а полные даты "
+                                f"относятся к: {found}; ожидается {expected_year}"
+                            )
                 self._validate_year(declared, expected_year)
             except ValueError as exc:
                 rejected.append(f"{name}: {exc}")
