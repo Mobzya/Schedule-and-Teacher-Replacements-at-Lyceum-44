@@ -344,6 +344,24 @@ class Database:
             cur = await db.execute(f"SELECT * FROM data_sources {where} ORDER BY source_type, priority DESC, id")
             return await cur.fetchall()
 
+    async def migrate_source_url(self, source_id: int, old_url: str, new_url: str) -> None:
+        """Update a known obsolete URL without deleting the last good snapshot."""
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE data_sources SET url=?,content_hash=NULL,last_status='never',last_error=NULL
+                   WHERE id=? AND url=?""",
+                (new_url, source_id, old_url),
+            )
+            await db.commit()
+
+    async def replacement_summary(self) -> dict[str, Any]:
+        async with self.connect() as db:
+            cur = await db.execute(
+                """SELECT COUNT(*) AS count,MIN(r.lesson_date) AS first_date,MAX(r.lesson_date) AS last_date
+                   FROM replacements r JOIN data_sources ds ON ds.id=r.source_id WHERE ds.enabled=1"""
+            )
+            return dict(await cur.fetchone())
+
     async def get_source(self, source_id: int):
         async with self.connect() as db:
             cur = await db.execute("SELECT * FROM data_sources WHERE id=?", (source_id,))

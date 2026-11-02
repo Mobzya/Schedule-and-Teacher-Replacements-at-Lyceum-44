@@ -23,6 +23,7 @@ def make_app(db: Database) -> web.Application:
                     "publication": state.value,
                     "sources": len(sources),
                     "source_errors": errors,
+                    "replacements": await db.replacement_summary(),
                 }
             )
         except Exception:

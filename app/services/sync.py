@@ -23,7 +23,8 @@ OFFICIAL_SCHEDULE_ID = "1yFbLC3cXH_Xuci_VBvxGKt9n6_QZpmTg"
 OFFICIAL_SCHEDULE_URL = f"https://docs.google.com/spreadsheets/d/{OFFICIAL_SCHEDULE_ID}/edit?usp=drivesdk"
 OFFICIAL_REPLACEMENTS_NAME = "official-replacements-2026-2027"
 OFFICIAL_REPLACEMENTS_ID = "1bZlIyg9_0JYLnN2WTD3SMxg4zHWe-PaqWDGYnZV1hEg"
-OFFICIAL_REPLACEMENTS_URL = f"https://docs.google.com/spreadsheets/d/{OFFICIAL_REPLACEMENTS_ID}/edit?gid=1372611677"
+LEGACY_REPLACEMENTS_URL = f"https://docs.google.com/spreadsheets/d/{OFFICIAL_REPLACEMENTS_ID}/edit?gid=1372611677"
+OFFICIAL_REPLACEMENTS_URL = f"https://docs.google.com/spreadsheets/d/{OFFICIAL_REPLACEMENTS_ID}/edit"
 
 
 class SyncService:
@@ -46,6 +47,19 @@ class SyncService:
             "Источник прошлого учебного года отключён после публикации итогового расписания",
         )
         sources = await self.db.list_sources()
+        # The original managed source was pinned to September. Changing the
+        # constant alone does not update an existing database (bootstrap is
+        # insert-only). Keep its snapshot and enabled flag during migration.
+        if self.settings.academic_year == "2026-2027":
+            for source in sources:
+                if (
+                    source["name"] == OFFICIAL_REPLACEMENTS_NAME
+                    and source["source_type"] == SourceType.REPLACEMENTS.value
+                    and source["url"] == LEGACY_REPLACEMENTS_URL
+                ):
+                    await self.db.migrate_source_url(
+                        int(source["id"]), LEGACY_REPLACEMENTS_URL, OFFICIAL_REPLACEMENTS_URL
+                    )
         official_exists = any(
             OFFICIAL_SCHEDULE_ID in source["url"] and source["source_type"] == SourceType.WEEKLY.value
             for source in sources
@@ -74,7 +88,9 @@ class SyncService:
     async def fetch_text(self, url: str) -> str:
         export_url = google_sheet_export_url(url)
         timeout = aiohttp.ClientTimeout(total=30)
-        async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Lyceum44ScheduleBot/3"}) as session:
+        async with aiohttp.ClientSession(
+            timeout=timeout, headers={"User-Agent": "Lyceum44ScheduleBot/3"}, trust_env=True
+        ) as session:
             async with session.get(export_url) as response:
                 response.raise_for_status()
                 data = await response.read()
@@ -89,7 +105,9 @@ class SyncService:
             return [(f"gid={gid}", await self.fetch_text(url))]
 
         timeout = aiohttp.ClientTimeout(total=60)
-        async with aiohttp.ClientSession(timeout=timeout, headers={"User-Agent": "Lyceum44ScheduleBot/3"}) as session:
+        async with aiohttp.ClientSession(
+            timeout=timeout, headers={"User-Agent": "Lyceum44ScheduleBot/3"}, trust_env=True
+        ) as session:
             async with session.get(google_workbook_export_url(url)) as response:
                 response.raise_for_status()
                 data = await response.read()
