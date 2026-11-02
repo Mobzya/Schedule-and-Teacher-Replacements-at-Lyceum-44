@@ -10,7 +10,7 @@ from app.services.schedule import ScheduleService
 
 
 class FakeCalendar:
-    async def school_day_info(self, day):
+    async def school_day_info(self, day, class_name=None):
         return True, day.weekday(), None
 
 

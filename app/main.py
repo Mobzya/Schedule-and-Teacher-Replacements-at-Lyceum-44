@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -10,12 +11,14 @@ from aiohttp import web
 
 from .config import load_settings
 from .db import Database
-from .handlers import admin, student
+from .handlers import admin, friends, student
 from .health import make_app
+from .services.avatars import AvatarService
 from .services.calendar import CalendarService
 from .services.notifications import NotificationService
 from .services.schedule import ScheduleService
 from .services.sync import SyncService
+from .utils import now_local
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -30,6 +33,26 @@ async def sync_worker(sync: SyncService, minutes: int):
         except Exception:
             logger.exception("Periodic sync failed")
         await asyncio.sleep(minutes * 60)
+
+
+async def avatar_worker(bot: Bot, db: Database, settings):
+    from aiogram.types import FSInputFile, InputProfilePhotoStatic
+
+    async def upload(theme):
+        path = Path(__file__).resolve().parents[1] / "public" / "avatars" / theme.filename
+        confirmed = await bot.set_my_profile_photo(photo=InputProfilePhotoStatic(photo=FSInputFile(path)))
+        if confirmed is not True:
+            raise RuntimeError("Telegram did not confirm profile photo update")
+
+    service = AvatarService(db, settings.timezone, upload)
+    while True:
+        try:
+            await service.refresh(now_local(settings.timezone))
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Avatar rotation failed")
+        await asyncio.sleep(600)
 
 
 async def main():
@@ -48,6 +71,7 @@ async def main():
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(admin.router)
     dp.include_router(student.router)
+    dp.include_router(friends.router)
 
     runner = web.AppRunner(make_app(db))
     await runner.setup()
@@ -59,6 +83,7 @@ async def main():
     tasks = [
         asyncio.create_task(sync_worker(sync, settings.source_sync_minutes)),
         asyncio.create_task(notifications.worker(bot)),
+        asyncio.create_task(avatar_worker(bot, db, settings)),
     ]
     try:
         await bot.delete_webhook(drop_pending_updates=True)

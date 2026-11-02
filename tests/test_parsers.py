@@ -8,7 +8,7 @@ from app.parsers import (
     parse_weekly_schedule,
     read_csv,
 )
-from app.source_urls import google_sheet_export_url
+from app.source_urls import google_sheet_export_url, google_sheet_public_tabs
 
 WEEKLY = """Расписание учебных занятий,,,,,,,,\nна 2026-2027 учебный год,,,,,,,,\n,,9а,каб,9е,каб,,,,9ю,каб\nпонедельник,,,,,,,,,,\n,1,Алгебра,316,Физика,301,,,1,Литература,210\n,2,Русский язык,211,Химия,305,,,2,История,104\nвторник,,,,,,,,,,\n,1,Биология,306,География,209,,,1,Физика,301\n"""
 
@@ -104,3 +104,24 @@ def test_weekly_schedule_ignores_transition_cells():
     lessons, _ = parse_weekly_schedule(text)
     assert len(lessons) == 5
     assert all(x.subject.lower() != "переход" for x in lessons)
+
+
+def test_public_sheet_tabs_decode_strings_and_do_not_follow_page_urls():
+    text = r"""items.push({name: "Замена ноябрь 2026", pageUrl: "https:\/\/example.test\x3fgid=999", gid: "123",initialSheet: true});
+    items.push({name: "A\x26B \"test\"", pageUrl: "ignored", gid: "124"});"""
+    assert google_sheet_public_tabs(text) == [("Замена ноябрь 2026", "123"), ('A&B "test"', "124")]
+
+
+def test_november_replacements_with_stale_october_caption():
+    text = """дата,урок,Класс,Предмет,Отсутствующий учитель,Основание,Заменяющий учитель,Кабинет,примеч
+ЗАМЕНА УРОКОВ. октябрь.,,,,,,,,
+03.11.2026 вторник,,,,,,,,
+03.ноя,2,5ю,Математика,Вакансия,Вакансия,Учитель А.,310,
+02.11.2026 понедельник,,,,,,,,
+02.ноя,4,11а,Информатика,Вакансия,Вакансия,Учитель Б.,301,
+"""
+    replacements, _ = parse_replacements(text, 2026)
+    assert {(r.lesson_date, r.class_name, r.lesson_number) for r in replacements} == {
+        (date(2026, 11, 3), "5ю", 2),
+        (date(2026, 11, 2), "11а", 4),
+    }

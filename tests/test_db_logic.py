@@ -106,3 +106,27 @@ async def test_disabled_source_classes_are_not_offered(tmp_path: Path):
     await db.set_source_enabled(disabled, False)
 
     assert await db.classes() == [("10а", None)]
+
+
+@pytest.mark.asyncio
+async def test_switching_to_unprofiled_class_clears_old_profile(tmp_path):
+    db = Database(tmp_path / "switch.db")
+    await db.init()
+    await db.set_user_class(42, "10а", "технологический", "2026-2027", 15)
+    await db.set_user_class(42, "5а", None, "2026-2027", 15)
+    assert (await db.get_user(42))["profile"] is None
+    await db.upsert_user(42, "2026-2027")
+    assert (await db.get_user(42))["class_name"] == "5а"
+
+
+@pytest.mark.asyncio
+async def test_unknown_legacy_year_resets_class(tmp_path):
+    db = Database(tmp_path / "legacy.db")
+    await db.init()
+    await db.set_user_class(42, "10а", "технологический", "2026-2027", 15)
+    async with db.connect() as connection:
+        await connection.execute("UPDATE users SET academic_year=NULL WHERE user_id=42")
+        await connection.commit()
+    await db.upsert_user(42, "2026-2027")
+    assert (await db.get_user(42))["class_name"] is None
+    assert (await db.get_user(42))["profile"] is None

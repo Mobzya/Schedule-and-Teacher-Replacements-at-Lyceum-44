@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import AsyncIterator, Iterable
 from contextlib import asynccontextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import aiosqlite
-import psycopg
-from psycopg.rows import dict_row
+try:
+    import aiosqlite
+except ImportError:  # Cloudflare Workers use the D1 binding instead.
+    aiosqlite = None
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:  # psycopg is not available in the Workers runtime.
+    psycopg = None
+    dict_row = None
 
 from .domain import ParsedLesson, ParsedReplacement, PublicationState, SourceType
 
@@ -101,6 +110,16 @@ CREATE TABLE IF NOT EXISTS notification_log(
   sent_at TEXT NOT NULL,
   PRIMARY KEY(user_id, notification_key)
 );
+CREATE TABLE IF NOT EXISTS notification_outbox(
+  user_id INTEGER NOT NULL,
+  notification_key TEXT NOT NULL,
+  message TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  next_attempt_at TEXT NOT NULL,
+  last_error TEXT,
+  PRIMARY KEY(user_id, notification_key)
+);
 CREATE TABLE IF NOT EXISTS audit_log(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   actor_id INTEGER,
@@ -111,6 +130,19 @@ CREATE TABLE IF NOT EXISTS audit_log(
 CREATE INDEX IF NOT EXISTS idx_dated_lookup ON dated_lessons(lesson_date,class_name);
 CREATE INDEX IF NOT EXISTS idx_weekly_lookup ON weekly_lessons(weekday,class_name);
 CREATE INDEX IF NOT EXISTS idx_replacements_lookup ON replacements(lesson_date,class_name);
+CREATE INDEX IF NOT EXISTS idx_notification_outbox_due ON notification_outbox(next_attempt_at,created_at);
+CREATE TABLE IF NOT EXISTS friends (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  owner_id INTEGER NOT NULL REFERENCES users(user_id) ON DELETE CASCADE,
+  label TEXT NOT NULL,
+  label_key TEXT NOT NULL,
+  class_name TEXT NOT NULL,
+  profile TEXT,
+  academic_year TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(owner_id, label_key)
+);
 """
 
 POSTGRES_SCHEMA = (
@@ -152,15 +184,98 @@ class PostgresConnection:
         await self.connection.rollback()
 
 
+class D1Cursor:
+    def __init__(self, results: list[dict], lastrowid: int | None = None, rowcount: int = 0):
+        self._results = results
+        self.lastrowid = lastrowid
+        self.rowcount = rowcount
+
+    async def fetchone(self):
+        return self._results[0] if self._results else None
+
+    async def fetchall(self):
+        return self._results
+
+
+class D1Connection:
+    """Async adapter for the Cloudflare D1 prepared-statement API."""
+
+    def __init__(self, binding):
+        self.binding = binding
+        self.pending: list[tuple[str, tuple]] | None = None
+
+    async def execute(self, query: str, params: tuple = ()) -> D1Cursor:
+        if query.strip().upper().startswith("BEGIN"):
+            self.pending = []
+            return D1Cursor([])
+        if query.strip().upper() in {"COMMIT", "ROLLBACK"}:
+            if query.strip().upper() == "COMMIT" and self.pending:
+                statements = [self._statement(sql, values) for sql, values in self.pending]
+                await self.binding.batch(statements)
+            self.pending = None
+            return D1Cursor([])
+        if self.pending is not None:
+            self.pending.append((query, tuple(params)))
+            return D1Cursor([])
+        statement = self._statement(query, tuple(params))
+        result = await statement.all()
+        rows = list(getattr(result, "results", []) or [])
+        meta = getattr(result, "meta", None)
+        return D1Cursor(
+            [dict(row) for row in rows],
+            getattr(meta, "last_row_id", None) if meta else None,
+            int(getattr(meta, "changes", 0) or 0) if meta else 0,
+        )
+
+    async def executemany(self, query: str, params: Iterable[tuple]) -> D1Cursor:
+        if self.pending is None:
+            raise RuntimeError("D1 executemany requires a transaction")
+        rows = [tuple(values) for values in params]
+        if not rows:
+            return D1Cursor([])
+        values_clause = re.search(r"VALUES\s*\((?:\s*\?\s*,)*\s*\?\s*\)\s*$", query, re.IGNORECASE)
+        if values_clause:
+            # A whole snapshot becomes one native D1 INSERT instead of hundreds
+            # of Python -> JS prepared-statement conversions. DELETE + INSERT
+            # still share the same atomic batch, so a failed import keeps old data.
+            count = query[values_clause.start() :].count("?")
+            if any(len(row) != count for row in rows):
+                raise ValueError("D1 bulk insert parameter count mismatch")
+            columns = ",".join(f"json_extract(value, '$[{index}]')" for index in range(count))
+            sql = query[: values_clause.start()] + f"SELECT {columns} FROM json_each(?)"
+            self.pending.append((sql, (json.dumps(rows, ensure_ascii=False),)))
+        else:
+            self.pending.extend((query, values) for values in rows)
+        return D1Cursor([])
+
+    async def commit(self) -> None:
+        if self.pending:
+            statements = [self._statement(sql, values) for sql, values in self.pending]
+            await self.binding.batch(statements)
+        self.pending = None
+
+    async def rollback(self) -> None:
+        self.pending = None
+
+    def _statement(self, query: str, params: tuple):
+        statement = self.binding.prepare(query)
+        return statement.bind(*params) if params else statement
+
+
 class Database:
-    def __init__(self, path: Path, database_url: str | None = None):
+    def __init__(self, path: Path, database_url: str | None = None, d1_binding=None):
         self.path = path
         self.database_url = database_url
+        self.d1_binding = d1_binding
         if database_url and not database_url.startswith(("postgres://", "postgresql://")):
             raise ValueError("DATABASE_URL must be a PostgreSQL connection string")
 
     async def init(self) -> None:
+        if self.d1_binding is not None:
+            return  # Schema is managed by Wrangler migrations.
         if self.database_url:
+            if psycopg is None:
+                raise RuntimeError("psycopg is required for PostgreSQL")
             connection = await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row)
             try:
                 for statement in POSTGRES_SCHEMA.split(";"):
@@ -171,6 +286,8 @@ class Database:
                 await connection.close()
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        if aiosqlite is None:
+            raise RuntimeError("aiosqlite is required for SQLite")
         async with aiosqlite.connect(self.path) as db:
             await db.executescript(SCHEMA)
             await db.execute("PRAGMA journal_mode=WAL")
@@ -178,13 +295,20 @@ class Database:
 
     @asynccontextmanager
     async def connect(self) -> AsyncIterator[Any]:
+        if self.d1_binding is not None:
+            yield D1Connection(self.d1_binding)
+            return
         if self.database_url:
+            if psycopg is None:
+                raise RuntimeError("psycopg is required for PostgreSQL")
             connection = await psycopg.AsyncConnection.connect(self.database_url, row_factory=dict_row)
             try:
                 yield PostgresConnection(connection)
             finally:
                 await connection.close()
             return
+        if aiosqlite is None:
+            raise RuntimeError("aiosqlite is required for SQLite")
         db = await aiosqlite.connect(self.path)
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA foreign_keys=ON")
@@ -254,12 +378,13 @@ class Database:
                    VALUES(?,?,?,?,?,?,?)
                    ON CONFLICT(user_id) DO UPDATE SET
                      class_name=CASE
-                       WHEN users.academic_year<>excluded.academic_year THEN excluded.class_name
+                       WHEN users.academic_year IS DISTINCT FROM excluded.academic_year THEN excluded.class_name
                        ELSE COALESCE(excluded.class_name,users.class_name)
                      END,
                      profile=CASE
-                       WHEN users.academic_year<>excluded.academic_year THEN excluded.profile
-                       ELSE COALESCE(excluded.profile,users.profile)
+                       WHEN users.academic_year IS DISTINCT FROM excluded.academic_year
+                         OR excluded.class_name IS NOT NULL THEN excluded.profile
+                       ELSE users.profile
                      END,
                      academic_year=excluded.academic_year,
                      updated_at=excluded.updated_at""",
@@ -288,10 +413,89 @@ class Database:
             )
             await db.commit()
 
-    async def all_users(self):
+    async def all_users(
+        self, after_user_id: int | None = None, limit: int | None = None, notification_year: str | None = None
+    ):
         async with self.connect() as db:
-            cur = await db.execute("SELECT * FROM users ORDER BY user_id")
+            query = "SELECT * FROM users"
+            params: tuple = ()
+            where = []
+            if notification_year is not None:
+                where.append(
+                    "academic_year=? AND class_name IS NOT NULL AND class_name<>'' "
+                    "AND (notifications=1 OR replacement_notifications=1 OR morning_summary=1)"
+                )
+                params += (notification_year,)
+            if after_user_id is not None:
+                where.append("user_id>?")
+                params += (after_user_id,)
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            query += " ORDER BY user_id"
+            if limit is not None:
+                query += " LIMIT ?"
+                params += (limit,)
+            cur = await db.execute(query, params)
             return await cur.fetchall()
+
+    async def list_friends(self, owner_id: int):
+        async with self.connect() as db:
+            cur = await db.execute("SELECT * FROM friends WHERE owner_id=? ORDER BY id LIMIT 30", (owner_id,))
+            return await cur.fetchall()
+
+    async def get_friend(self, owner_id: int, friend_id: int):
+        async with self.connect() as db:
+            cur = await db.execute("SELECT * FROM friends WHERE owner_id=? AND id=?", (owner_id, friend_id))
+            return await cur.fetchone()
+
+    async def save_friend(
+        self,
+        owner_id: int,
+        label: str,
+        class_name: str,
+        profile: str | None,
+        academic_year: str,
+        friend_id: int | None = None,
+    ) -> bool:
+        """Atomic per-owner limit/duplicate checks, including concurrent webhook requests."""
+        now = datetime.now(UTC).isoformat()
+        key = label.casefold()
+        async with self.connect() as db:
+            if friend_id is None:
+                cur = await db.execute(
+                    """INSERT INTO friends(owner_id,label,label_key,class_name,profile,academic_year,created_at,updated_at)
+                       SELECT ?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM friends WHERE owner_id=?)<30
+                       ON CONFLICT(owner_id,label_key) DO NOTHING RETURNING id""",
+                    (owner_id, label, key, class_name, profile, academic_year, now, now, owner_id),
+                )
+            else:
+                cur = await db.execute(
+                    """UPDATE friends SET label=?,label_key=?,class_name=?,profile=?,academic_year=?,updated_at=?
+                       WHERE owner_id=? AND id=? AND NOT EXISTS (
+                         SELECT 1 FROM friends WHERE owner_id=? AND label_key=? AND id<>?
+                       ) RETURNING id""",
+                    (
+                        label,
+                        key,
+                        class_name,
+                        profile,
+                        academic_year,
+                        now,
+                        owner_id,
+                        friend_id,
+                        owner_id,
+                        key,
+                        friend_id,
+                    ),
+                )
+            saved = await cur.fetchone()
+            await db.commit()
+            return saved is not None
+
+    async def delete_friend(self, owner_id: int, friend_id: int) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM friends WHERE owner_id=? AND id=?", (owner_id, friend_id))
+            await db.commit()
 
     async def add_source(
         self,
@@ -307,7 +511,7 @@ class Database:
         async with self.connect() as db:
             query = """INSERT INTO data_sources(name,source_type,url,priority,valid_from,valid_until,expected_academic_year,created_by,created_at)
                    VALUES(?,?,?,?,?,?,?,?,?)"""
-            if self.database_url:
+            if self.database_url or self.d1_binding is not None:
                 query += " RETURNING id"
             cur = await db.execute(
                 query,
@@ -323,7 +527,11 @@ class Database:
                     datetime.now(UTC).isoformat(),
                 ),
             )
-            source_id = int((await cur.fetchone())["id"]) if self.database_url else int(cur.lastrowid)
+            source_id = (
+                int((await cur.fetchone())["id"])
+                if self.database_url or self.d1_binding is not None
+                else int(cur.lastrowid)
+            )
             await db.commit()
             return source_id
 
@@ -333,8 +541,9 @@ class Database:
         async with self.connect() as db:
             await db.execute(
                 """INSERT INTO data_sources(name,source_type,url,priority,expected_academic_year,created_at)
-                   VALUES(?,?,?,?,?,?) ON CONFLICT(name) DO NOTHING""",
-                (name, source_type.value, url, priority, expected_year, datetime.now(UTC).isoformat()),
+                   SELECT ?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM data_sources WHERE name=?)
+                   ON CONFLICT(name) DO NOTHING""",
+                (name, source_type.value, url, priority, expected_year, datetime.now(UTC).isoformat(), name),
             )
             await db.commit()
 
@@ -343,6 +552,11 @@ class Database:
         async with self.connect() as db:
             cur = await db.execute(f"SELECT * FROM data_sources {where} ORDER BY source_type, priority DESC, id")
             return await cur.fetchall()
+
+    async def get_source(self, source_id: int):
+        async with self.connect() as db:
+            cur = await db.execute("SELECT * FROM data_sources WHERE id=?", (source_id,))
+            return await cur.fetchone()
 
     async def migrate_source_url(self, source_id: int, old_url: str, new_url: str) -> None:
         """Update a known obsolete URL without deleting the last good snapshot."""
@@ -361,11 +575,6 @@ class Database:
                    FROM replacements r JOIN data_sources ds ON ds.id=r.source_id WHERE ds.enabled=1"""
             )
             return dict(await cur.fetchone())
-
-    async def get_source(self, source_id: int):
-        async with self.connect() as db:
-            cur = await db.execute("SELECT * FROM data_sources WHERE id=?", (source_id,))
-            return await cur.fetchone()
 
     async def set_source_enabled(self, source_id: int, enabled: bool, actor_id: int | None = None) -> None:
         async with self.connect() as db:
@@ -410,7 +619,7 @@ class Database:
         replacements: Iterable[ParsedReplacement],
     ) -> None:
         async with self.connect() as db:
-            await db.execute("BEGIN" if self.database_url else "BEGIN IMMEDIATE")
+            await db.execute("BEGIN" if self.database_url or self.d1_binding is not None else "BEGIN IMMEDIATE")
             try:
                 if source_type == SourceType.WEEKLY:
                     await db.execute("DELETE FROM weekly_lessons WHERE source_id=?", (source_id,))
@@ -533,4 +742,79 @@ class Database:
                    ON CONFLICT(user_id,notification_key) DO NOTHING""",
                 (user_id, key, datetime.now(UTC).isoformat()),
             )
+            await db.commit()
+
+    async def enqueue_notification(self, user_id: int, key: str, message: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        async with self.connect() as db:
+            await db.execute(
+                """INSERT INTO notification_outbox(user_id,notification_key,message,created_at,next_attempt_at)
+                   SELECT ?,?,?,?,? WHERE NOT EXISTS (
+                     SELECT 1 FROM notification_log WHERE user_id=? AND notification_key=?
+                   ) ON CONFLICT(user_id,notification_key) DO NOTHING""",
+                (user_id, key, message, now, now, user_id, key),
+            )
+            await db.commit()
+
+    async def enqueue_notifications(self, user_ids: Iterable[int], key: str, message: str) -> int:
+        """Durably enqueue one announcement for a page of users in one DB batch."""
+        now = datetime.now(UTC).isoformat()
+        rows = [(int(user_id), key, message, now, now) for user_id in user_ids]
+        if not rows:
+            return 0
+        async with self.connect() as db:
+            await db.execute("BEGIN" if self.database_url or self.d1_binding is not None else "BEGIN IMMEDIATE")
+            await db.executemany(
+                """INSERT INTO notification_outbox(user_id,notification_key,message,created_at,next_attempt_at)
+                   VALUES(?,?,?,?,?) ON CONFLICT(user_id,notification_key) DO NOTHING""",
+                rows,
+            )
+            await db.commit()
+        return len(rows)
+
+    async def pending_notifications(self, limit: int = 1):
+        now = datetime.now(UTC).isoformat()
+        async with self.connect() as db:
+            cur = await db.execute(
+                """SELECT * FROM notification_outbox WHERE next_attempt_at<=?
+                   ORDER BY created_at,user_id LIMIT ?""",
+                (now, limit),
+            )
+            return await cur.fetchall()
+
+    async def finish_notification(self, user_id: int, key: str) -> None:
+        async with self.connect() as db:
+            await db.execute("BEGIN" if self.database_url or self.d1_binding is not None else "BEGIN IMMEDIATE")
+            try:
+                await db.execute(
+                    "INSERT INTO notification_log(user_id,notification_key,sent_at) VALUES(?,?,?) "
+                    "ON CONFLICT(user_id,notification_key) DO NOTHING",
+                    (user_id, key, datetime.now(UTC).isoformat()),
+                )
+                await db.execute(
+                    "DELETE FROM notification_outbox WHERE user_id=? AND notification_key=?", (user_id, key)
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    async def retry_notification(self, user_id: int, key: str, error: str, delay_seconds: int) -> None:
+        now = datetime.now(UTC)
+        async with self.connect() as db:
+            await db.execute(
+                """UPDATE notification_outbox SET attempts=attempts+1,last_error=?,next_attempt_at=?
+                   WHERE user_id=? AND notification_key=?""",
+                (
+                    error[:500],
+                    (now + timedelta(seconds=max(1, delay_seconds))).isoformat(),
+                    user_id,
+                    key,
+                ),
+            )
+            await db.commit()
+
+    async def discard_notification(self, user_id: int, key: str) -> None:
+        async with self.connect() as db:
+            await db.execute("DELETE FROM notification_outbox WHERE user_id=? AND notification_key=?", (user_id, key))
             await db.commit()

@@ -1,19 +1,45 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import date, timedelta
+from types import SimpleNamespace
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from ..config import Settings
 from ..db import Database
 from ..domain import PublicationState
 from ..services.schedule import ScheduleService
-from ..ui import back_home, lesson_line, main_keyboard, render_day, render_waiting
+from ..ui import (
+    HELP_TEXT,
+    back_home,
+    bells_text,
+    class_picker,
+    day_markup,
+    fit_lines,
+    lesson_line,
+    main_keyboard,
+    notification_settings_view,
+    render_day,
+    render_waiting,
+    render_week,
+    settings_view,
+    week_markup,
+)
 from ..utils import RU_WEEKDAYS, esc, now_local
 
 router = Router()
+
+
+@router.callback_query.middleware()
+async def leave_input_on_navigation(handler, event, data):
+    # Inner middleware runs only after a student callback has matched; friend
+    # callbacks live in their own router and keep their draft until completion.
+    if state := data.get("state"):
+        await state.clear()
+    return await handler(event, data)
 
 
 def _is_admin(settings: Settings, user_id: int) -> bool:
@@ -36,12 +62,11 @@ async def render_home(
         return render_waiting(await db.waiting_message()), main_keyboard(_is_admin(settings, user_id))
     user = await db.get_user(user_id)
     if not user or user["academic_year"] != settings.academic_year or not user["class_name"]:
-        text = (
-            f"👋 <b>{esc(first_name)}</b>\n\n"
-            "✅ Расписание опубликовано.\n"
-            "Чтобы показывать только ваши уроки и присылать правильные уведомления, выберите актуальный класс."
+        title, keyboard = class_picker(await db.classes())
+        keyboard["inline_keyboard"].append(
+            [{"text": "👥 Друзья", "callback_data": "f:list:0"}, {"text": "⚙️ Настройки", "callback_data": "settings"}]
         )
-        return text, main_keyboard(_is_admin(settings, user_id), class_selected=False)
+        return f"👋 {esc(first_name)}!\n\n{title}", InlineKeyboardMarkup(**keyboard)
     now = now_local(settings.timezone)
     current, nxt, info = await schedules.current_and_next(user["class_name"], user["profile"], now)
     class_display = _class_display(user)
@@ -69,7 +94,7 @@ async def render_home(
                 if future_without_time:
                     parts += [
                         "📚 <b>Расписание на сегодня загружено</b>",
-                        "Откройте «Сегодня», чтобы увидеть все уроки.",
+                        "Откройте «Расписание», чтобы увидеть все уроки.",
                     ]
                 else:
                     parts.append("✅ На сегодня занятия закончились.")
@@ -94,7 +119,10 @@ async def user_id(message: Message):
 
 
 @router.callback_query(F.data == "home")
-async def home(callback: CallbackQuery, db: Database, settings: Settings, schedules: ScheduleService):
+async def home(
+    callback: CallbackQuery, db: Database, settings: Settings, schedules: ScheduleService, state: FSMContext
+):
+    await state.clear()
     text, kb = await render_home(
         callback.from_user.id, callback.from_user.first_name or "Ученик", db, settings, schedules
     )
@@ -103,6 +131,8 @@ async def home(callback: CallbackQuery, db: Database, settings: Settings, schedu
 
 
 @router.callback_query(F.data == "today")
+@router.callback_query(F.data == "tomorrow")
+@router.callback_query(F.data.startswith("day:"))
 async def today(callback: CallbackQuery, db: Database, settings: Settings, schedules: ScheduleService):
     user = await db.get_user(callback.from_user.id)
     state = await db.publication_state()
@@ -121,10 +151,24 @@ async def today(callback: CallbackQuery, db: Database, settings: Settings, sched
             ),
         )
     else:
-        day = now_local(settings.timezone).date()
+        current_date = now_local(settings.timezone).date()
+        try:
+            day = (
+                date.fromisoformat(callback.data.split(":", 1)[1])
+                if callback.data.startswith("day:")
+                else current_date + timedelta(days=callback.data == "tomorrow")
+            )
+        except ValueError:
+            await callback.answer("Кнопка устарела. Откройте /start.", show_alert=True)
+            return
+        if abs((day - current_date).days) > 56:
+            await callback.answer("Доступны даты в пределах восьми недель", show_alert=True)
+            return
         info = await schedules.day_schedule(user["class_name"], user["profile"], day)
         await callback.message.edit_text(
-            render_day(day, _class_display(user), info), parse_mode="HTML", reply_markup=back_home()
+            render_day(day, _class_display(user), info),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(**day_markup(day, current_date)),
         )
     await callback.answer()
 
@@ -144,29 +188,14 @@ async def week(callback: CallbackQuery, db: Database, settings: Settings, schedu
     offset = max(-8, min(8, int(callback.data.split(":", 1)[1])))
     today = now_local(settings.timezone).date()
     monday = today - timedelta(days=today.weekday()) + timedelta(weeks=offset)
-    parts = [
-        f"📆 <b>Неделя {monday.strftime('%d.%m')}–{(monday + timedelta(days=6)).strftime('%d.%m')}</b> · {esc(_class_display(user))}"
+    days = [
+        await schedules.day_schedule(user["class_name"], user["profile"], monday + timedelta(days=i)) for i in range(7)
     ]
-    for i in range(5):
-        day = monday + timedelta(days=i)
-        info = await schedules.day_schedule(user["class_name"], user["profile"], day)
-        parts += ["", f"<b>{RU_WEEKDAYS[i].capitalize()} · {day.strftime('%d.%m')}</b>"]
-        if info["state"] == "ready":
-            parts += [lesson_line(x) for x in info["lessons"]]
-        else:
-            parts.append(f"ℹ️ {esc(info['message'])}")
-    text = "\n".join(parts)
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="←", callback_data=f"week:{offset - 1}"),
-                InlineKeyboardButton(text="Текущая", callback_data="week:0"),
-                InlineKeyboardButton(text="→", callback_data=f"week:{offset + 1}"),
-            ],
-            [InlineKeyboardButton(text="← На главную", callback_data="home")],
-        ]
+    await callback.message.edit_text(
+        render_week(monday, _class_display(user), days),
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(**week_markup(monday, offset)),
     )
-    await callback.message.edit_text(text[:4096], parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
 
@@ -195,42 +224,38 @@ async def changes(callback: CallbackQuery, db: Database, settings: Settings, sch
         parts += ["", "На ближайшие 14 дней опубликованных изменений нет."]
     for day, lessons in found:
         parts += ["", f"<b>{day.strftime('%d.%m')}</b>", *[lesson_line(x) for x in lessons]]
-    await callback.message.edit_text("\n".join(parts)[:4096], parse_mode="HTML", reply_markup=back_home())
+    await callback.message.edit_text(fit_lines(parts), parse_mode="HTML", reply_markup=back_home())
     await callback.answer()
 
 
 @router.callback_query(F.data == "class:choose")
+@router.callback_query(F.data.startswith("grade:"))
 async def choose_class(callback: CallbackQuery, db: Database, settings: Settings):
-    if await db.publication_state() == PublicationState.WAITING:
-        await callback.answer("Классы появятся после публикации расписания", show_alert=True)
-        return
     classes = await db.classes()
-    names = sorted({c for c, _ in classes}, key=lambda x: (int("".join(filter(str.isdigit, x)) or 0), x))
-    if not names:
-        await callback.answer("В расписании пока не найдено ни одного класса", show_alert=True)
-        return
-    rows = [
-        [InlineKeyboardButton(text=name.upper(), callback_data=f"classn:{name}") for name in names[i : i + 4]]
-        for i in range(0, len(names), 4)
-    ]
-    rows.append([InlineKeyboardButton(text="← На главную", callback_data="home")])
-    await callback.message.edit_text(
-        "🎓 <b>Выберите класс</b>", parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
-    )
+    user = await db.get_user(callback.from_user.id)
+    grade = callback.data.split(":", 1)[1] if callback.data.startswith("grade:") else None
+    text, keyboard = class_picker(classes, grade, user["class_name"] if user else None)
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(**keyboard))
     await callback.answer()
 
 
 @router.callback_query(F.data.startswith("classn:"))
-async def choose_profile(callback: CallbackQuery, db: Database, settings: Settings):
+async def choose_profile(callback: CallbackQuery, db: Database, settings: Settings, schedules: ScheduleService):
     class_name = callback.data.split(":", 1)[1]
     choices = [(c, p) for c, p in await db.classes() if c == class_name]
+    if not choices:
+        await callback.answer("Класс больше недоступен. Обновите список.", show_alert=True)
+        return
     profiles = sorted({p for _, p in choices if p})
     if not profiles:
         await db.set_user_class(
             callback.from_user.id, class_name, None, settings.academic_year, settings.default_reminder_minutes
         )
         await callback.answer("Класс сохранён")
-        await callback.message.edit_text("✅ Класс сохранён.", reply_markup=back_home())
+        text, keyboard = await render_home(
+            callback.from_user.id, callback.from_user.first_name or "Ученик", db, settings, schedules
+        )
+        await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
         return
     rows = [[InlineKeyboardButton(text=p, callback_data=f"profile:{class_name}:{i}")] for i, p in enumerate(profiles)]
     rows.append([InlineKeyboardButton(text="← Назад", callback_data="class:choose")])
@@ -243,7 +268,7 @@ async def choose_profile(callback: CallbackQuery, db: Database, settings: Settin
 
 
 @router.callback_query(F.data.startswith("profile:"))
-async def set_profile(callback: CallbackQuery, db: Database, settings: Settings):
+async def set_profile(callback: CallbackQuery, db: Database, settings: Settings, schedules: ScheduleService):
     _, class_name, idx_s = callback.data.split(":", 2)
     profiles = sorted({p for c, p in await db.classes() if c == class_name and p})
     idx = int(idx_s)
@@ -253,37 +278,30 @@ async def set_profile(callback: CallbackQuery, db: Database, settings: Settings)
     await db.set_user_class(
         callback.from_user.id, class_name, profiles[idx], settings.academic_year, settings.default_reminder_minutes
     )
-    await callback.message.edit_text("✅ Класс и профиль сохранены.", reply_markup=back_home())
-    await callback.answer()
+    text, keyboard = await render_home(
+        callback.from_user.id, callback.from_user.first_name or "Ученик", db, settings, schedules
+    )
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=keyboard)
+    await callback.answer("Класс и профиль сохранены")
 
 
 @router.callback_query(F.data == "settings")
-async def settings_screen(callback: CallbackQuery, db: Database, settings: Settings):
+@router.callback_query(F.data == "settings:notifications")
+async def settings_screen(callback: CallbackQuery, db: Database, settings: Settings, state: FSMContext = None):
+    if state:
+        await state.clear()
     user = await db.get_user(callback.from_user.id)
     if not user:
         await db.upsert_user(
             callback.from_user.id, settings.academic_year, default_reminder=settings.default_reminder_minutes
         )
         user = await db.get_user(callback.from_user.id)
-    text = (
-        "⚙️ <b>Уведомления</b>\n\n"
-        f"Перед уроком: {'✅' if user['notifications'] else '❌'}\n"
-        f"За сколько: {user['reminder_minutes']} мин\n"
-        f"Изменения/замены: {'✅' if user['replacement_notifications'] else '❌'}\n"
-        f"Утренняя сводка: {'✅' if user['morning_summary'] else '❌'}"
+    text, keyboard = (
+        settings_view(user, _class_display(user), _is_admin(settings, callback.from_user.id))
+        if callback.data == "settings"
+        else notification_settings_view(user, _class_display(user))
     )
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔔 Перед уроком", callback_data="setting:notifications")],
-            [
-                InlineKeyboardButton(text="⚡ Изменения", callback_data="setting:replacement_notifications"),
-                InlineKeyboardButton(text="🌅 Сводка", callback_data="setting:morning_summary"),
-            ],
-            [InlineKeyboardButton(text=f"⏱ {m} мин", callback_data=f"remind:{m}") for m in (5, 10, 15)],
-            [InlineKeyboardButton(text=f"⏱ {m} мин", callback_data=f"remind:{m}") for m in (20, 30, 45)],
-            [InlineKeyboardButton(text="← На главную", callback_data="home")],
-        ]
-    )
+    kb = InlineKeyboardMarkup(**keyboard)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
     await callback.answer()
 
@@ -291,16 +309,73 @@ async def settings_screen(callback: CallbackQuery, db: Database, settings: Setti
 @router.callback_query(F.data.startswith("setting:"))
 async def toggle_setting(callback: CallbackQuery, db: Database, settings: Settings):
     field = callback.data.split(":", 1)[1]
+    if field not in {"notifications", "replacement_notifications", "morning_summary"}:
+        await callback.answer("Неизвестная настройка", show_alert=True)
+        return
     user = await db.get_user(callback.from_user.id)
+    if not user:
+        await db.upsert_user(
+            callback.from_user.id, settings.academic_year, default_reminder=settings.default_reminder_minutes
+        )
+        user = await db.get_user(callback.from_user.id)
     await db.update_user_setting(callback.from_user.id, field, 0 if user[field] else 1)
     await settings_screen(callback, db, settings)
 
 
 @router.callback_query(F.data.startswith("remind:"))
-async def reminder(callback: CallbackQuery, db: Database):
+async def reminder(callback: CallbackQuery, db: Database, settings: Settings):
     minutes = int(callback.data.split(":", 1)[1])
+    if minutes not in (5, 10, 15, 20, 30, 45):
+        await callback.answer("Недопустимый интервал", show_alert=True)
+        return
     await db.update_user_setting(callback.from_user.id, "reminder_minutes", minutes)
-    await callback.answer(f"Напоминание за {minutes} мин")
+    await settings_screen(callback, db, settings)
+
+
+@router.callback_query(F.data == "help")
+async def help_screen(callback: CallbackQuery):
+    await callback.message.edit_text(HELP_TEXT, parse_mode="HTML", reply_markup=back_home())
+    await callback.answer()
+
+
+@router.callback_query(F.data == "bells")
+async def bells(callback: CallbackQuery, db: Database, settings: Settings, schedules: ScheduleService):
     user = await db.get_user(callback.from_user.id)
-    text = f"✅ Напоминания будут приходить за <b>{user['reminder_minutes']} минут</b> до урока."
+    if not user or not user["class_name"] or user["academic_year"] != settings.academic_year:
+        await choose_class(callback, db, settings)
+        return
+    text = bells_text(schedules.bell_times_for_class(user["class_name"]), _class_display(user))
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=back_home())
+    await callback.answer()
+
+
+@router.message(Command("today", "tomorrow", "week", "changes", "settings", "help", "bells"))
+async def command_screen(
+    message: Message, db: Database, settings: Settings, schedules: ScheduleService, state: FSMContext
+):
+    await state.clear()
+    command = message.text.split(maxsplit=1)[0].split("@", 1)[0][1:]
+
+    async def answered(*args, **kwargs):
+        return None
+
+    # Reuse the same views for typed commands; a command sends a fresh panel,
+    # while inline buttons edit the existing panel.
+    event = SimpleNamespace(
+        from_user=message.from_user,
+        message=SimpleNamespace(edit_text=message.answer),
+        data="week:0" if command == "week" else command,
+        answer=answered,
+    )
+    if command in {"today", "tomorrow"}:
+        await today(event, db, settings, schedules)
+    elif command == "week":
+        await week(event, db, settings, schedules)
+    elif command == "changes":
+        await changes(event, db, settings, schedules)
+    elif command == "settings":
+        await settings_screen(event, db, settings)
+    elif command == "bells":
+        await bells(event, db, settings, schedules)
+    else:
+        await help_screen(event)

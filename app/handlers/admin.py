@@ -61,26 +61,44 @@ async def admin_text(db: Database) -> str:
     )
 
 
+@router.message(Command("cancel", "start", "menu"))
+async def reset_input(message: Message, state: FSMContext, db: Database, settings: Settings, schedules):
+    from .student import start
+
+    await state.clear()
+    await start(message, db, settings, schedules)
+
+
+@router.message(Command("today", "tomorrow", "week", "changes", "settings", "help", "bells"))
+async def open_view(message: Message, state: FSMContext, db: Database, settings: Settings, schedules):
+    from .student import command_screen
+
+    await command_screen(message, db, settings, schedules, state)
+
+
 @router.message(Command("admin"))
-async def admin_cmd(message: Message, settings: Settings, db: Database):
+async def admin_cmd(message: Message, settings: Settings, db: Database, state: FSMContext):
     if not _admin(settings, message.from_user.id):
         return
+    await state.clear()
     await message.answer(await admin_text(db), parse_mode="HTML", reply_markup=_admin_kb())
 
 
 @router.callback_query(F.data == "admin")
-async def admin_home(callback: CallbackQuery, settings: Settings, db: Database):
+async def admin_home(callback: CallbackQuery, settings: Settings, db: Database, state: FSMContext):
     if not _admin(settings, callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
+    await state.clear()
     await callback.message.edit_text(await admin_text(db), parse_mode="HTML", reply_markup=_admin_kb())
     await callback.answer()
 
 
 @router.callback_query(F.data == "admin:sources")
-async def sources(callback: CallbackQuery, settings: Settings, db: Database):
+async def sources(callback: CallbackQuery, settings: Settings, db: Database, state: FSMContext):
     if not _admin(settings, callback.from_user.id):
         return
+    await state.clear()
     srcs = await db.list_sources()
     lines = ["📡 <b>Источники данных</b>", ""]
     rows = []
@@ -363,9 +381,14 @@ async def sync_all(callback: CallbackQuery, settings: Settings, sync: SyncServic
     if not _admin(settings, callback.from_user.id):
         return
     await callback.answer("Запускаю синхронизацию…")
-    result = await sync.sync_all()
+    result = await (sync.sync_next() if sync.db.d1_binding is not None else sync.sync_all())
     await callback.message.edit_text(
-        f"🔄 <b>Синхронизация завершена</b>\n\n✅ Успешно: {result['ok']}\n❌ Ошибок: {result['failed']}\n⏭ Пропущено: {result['skipped']}",
+        f"🔄 <b>Синхронизация завершена</b>\n\n✅ Успешно: {result['ok']}\n❌ Ошибок: {result['failed']}\n⏭ Пропущено: {result['skipped']}"
+        + (
+            "\n\nCloudflare обрабатывает источники по одному; остальные пройдут в следующих запусках."
+            if sync.db.d1_binding is not None
+            else ""
+        ),
         parse_mode="HTML",
         reply_markup=_admin_kb(),
     )
@@ -385,7 +408,7 @@ async def publication(callback: CallbackQuery, settings: Settings, db: Database)
     text = f"🚦 <b>Публикация</b>\n\nТекущее состояние: <b>{state.value}</b>\nПроверенных источников расписания: <b>{len(good_sched)}</b>\n\nВ WAITING ученики видят сообщение о подготовке расписания. В READY отображаются сохранённые snapshot-ы."
     kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="✅ Опубликовать + уведомить", callback_data="admin:publish")],
+            [InlineKeyboardButton(text="✅ Опубликовать расписание", callback_data="admin:publish")],
             [InlineKeyboardButton(text="🟡 Вернуть в ожидание", callback_data="admin:set_waiting")],
             [
                 InlineKeyboardButton(
@@ -411,11 +434,9 @@ async def publish(callback: CallbackQuery, bot: Bot, settings: Settings, db: Dat
         await callback.answer("Нет ни одного успешно проверенного источника расписания", show_alert=True)
         return
     await db.set_publication_state(PublicationState.READY, callback.from_user.id)
-    users = await db.all_users()
-    text = "✅ <b>Расписание опубликовано</b>\n\nБот получил расписание на новый учебный год. Откройте бота и выберите актуальный класс — после этого станут доступны «Сегодня», неделя и уведомления."
-    result = await broadcast(bot, [int(u["user_id"]) for u in users], text)
     await callback.message.edit_text(
-        f"✅ Расписание опубликовано.\n\nУведомления: {result['ok']} доставлено, {result['blocked']} заблокировали бота, {result['failed']} ошибок.",
+        "✅ Расписание опубликовано. Отдельное сообщение не требуется. "
+        "Если хотите оповестить пользователей, откройте «📣 Рассылка» и отправьте отдельное объявление.",
         reply_markup=_admin_kb(),
     )
     await callback.answer()

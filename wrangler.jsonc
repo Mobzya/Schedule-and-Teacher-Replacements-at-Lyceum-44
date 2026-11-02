@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "lyceum44-schedule-bot",
+  "main": "cloudflare/worker.py",
+  "build": {
+    "command": "bash scripts/cloudflare-build.sh"
+  },
+  "compatibility_date": "2026-10-06",
+  "compatibility_flags": ["python_workers"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "triggers": {
+    "crons": ["*/2 * * * *", "1-59/2 * * * *", "3-59/10 * * * *"]
+  },
+  "vars": {
+    "TIMEZONE": "Europe/Moscow",
+    "ACADEMIC_YEAR": "2026-2027",
+    "DEFAULT_REMINDER_MINUTES": "15",
+    "SOURCE_SYNC_MINUTES": "10",
+    "NOTIFICATION_TICK_SECONDS": "60",
+    "BOOTSTRAP_SCHEDULE_SOURCES_JSON": "{}",
+    "BOOTSTRAP_REPLACEMENT_SOURCES_JSON": "{}",
+    "BELL_SCHEDULES_JSON": "{\"main\":[[\"08:15\",\"09:00\"],[\"09:15\",\"10:00\"],[\"10:15\",\"11:00\"],[\"11:15\",\"12:00\"],[\"12:15\",\"13:00\"],[\"13:15\",\"14:00\"],[\"14:15\",\"15:00\"],[\"15:15\",\"16:00\"]]}"
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "lyceum44-schedule",
+      "database_id": "b6ab3461-0a51-4fac-b9db-9808f5dbc464",
+      "migrations_dir": "cloudflare/migrations"
+    }
+  ]
+}

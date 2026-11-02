@@ -1,3 +1,23 @@
+[project]
+name = "lyceum44-schedule-bot"
+version = "3.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "holidays==0.103",
+    "openpyxl==3.1.5",
+    "tzdata==2026.5",
+]
+
+[dependency-groups]
+dev = ["workers-py"]
+local = [
+    "aiogram==3.31.0",
+    "aiohttp==3.14.3",
+    "aiosqlite==0.22.1",
+    "python-dotenv==1.2.3",
+    "psycopg[binary]==3.2.10",
+]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 120

@@ -45,7 +45,7 @@ class ScheduleService:
         if publication == PublicationState.PAUSED:
             return {"state": "paused", "message": "Расписание временно скрыто администратором.", "lessons": []}
 
-        is_school, schedule_weekday, note = await self.calendar.school_day_info(day)
+        is_school, schedule_weekday, note = await self.calendar.school_day_info(day, class_name)
         if not is_school:
             return {"state": "day_off", "message": note or "Сегодня занятий нет.", "lessons": []}
 

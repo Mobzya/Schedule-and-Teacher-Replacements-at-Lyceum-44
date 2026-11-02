@@ -1,23 +1,21 @@
 import io
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 from openpyxl import Workbook
 
 from app.config import Settings
 from app.db import Database
-from app.domain import ParsedLesson, ParsedReplacement, PublicationState, SourceType
-from app.services.calendar import CalendarService
-from app.services.schedule import ScheduleService
+from app.domain import ParsedLesson, ParsedReplacement, SourceType
 from app.services.sync import (
-    LEGACY_REPLACEMENTS_URL,
     OFFICIAL_REPLACEMENTS_ID,
-    OFFICIAL_REPLACEMENTS_NAME,
     OFFICIAL_REPLACEMENTS_URL,
+    OFFICIAL_SCHEDULE_ID,
+    OFFICIAL_SCHEDULE_TABS,
     SyncService,
 )
-from app.source_urls import google_sheet_parts
 
 
 def test_xlsx_sheets_reads_visible_tabs_and_integral_numbers():
@@ -115,114 +113,12 @@ async def test_bootstrap_adds_official_schedule_and_retires_legacy(tmp_path: Pat
     await SyncService(db, settings).bootstrap()
     sources = await db.list_sources()
 
-    official = [source for source in sources if source["name"] == "official-2026-2027"]
-    replacements = [source for source in sources if OFFICIAL_REPLACEMENTS_ID in source["url"]]
+    official = [source for source in sources if OFFICIAL_SCHEDULE_ID in source["url"] and "gid=" in source["url"]]
+    replacements = [source for source in sources if source["url"] == OFFICIAL_REPLACEMENTS_URL]
     legacy = [source for source in sources if source["name"] == "legacy"]
-    assert len(official) == 1 and official[0]["enabled"]
+    assert len(official) == len(OFFICIAL_SCHEDULE_TABS) and all(source["enabled"] for source in official)
     assert len(replacements) == 1 and replacements[0]["enabled"]
-    assert google_sheet_parts(replacements[0]["url"])[1] is None
     assert len(legacy) == 1 and not legacy[0]["enabled"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("enabled", [True, False])
-async def test_bootstrap_migrates_managed_september_link_without_losing_snapshot(tmp_path: Path, enabled):
-    path = tmp_path / "db.sqlite"
-    db = Database(path)
-    await db.init()
-    sid = await db.add_source(
-        OFFICIAL_REPLACEMENTS_NAME, SourceType.REPLACEMENTS, LEGACY_REPLACEMENTS_URL, 200, None, None, "2026-2027", None
-    )
-    await db.replace_source_snapshot(
-        sid, SourceType.REPLACEMENTS, [], [ParsedReplacement(date(2026, 9, 30), "11а", 2, "Информатика", None, "301")]
-    )
-    await db.source_status(sid, "ok", None, "september-hash", True)
-    await db.set_source_enabled(sid, enabled)
-    service = SyncService(db, _settings(path))
-
-    await service.bootstrap()
-    source = await db.get_source(sid)
-
-    assert source["url"] == OFFICIAL_REPLACEMENTS_URL
-    assert bool(source["enabled"]) is enabled
-    assert source["priority"] == 200
-    assert source["content_hash"] is None
-    assert source["last_status"] == "never"
-    async with db.connect() as connection:
-        rows = await (await connection.execute("SELECT * FROM replacements WHERE source_id=?", (sid,))).fetchall()
-    assert len(rows) == 1 and rows[0]["lesson_date"] == "2026-09-30"
-
-    await db.source_status(sid, "ok", None, "november-hash", True)
-    await service.bootstrap()
-    assert (await db.get_source(sid))["content_hash"] == "november-hash"
-    assert len([s for s in await db.list_sources() if OFFICIAL_REPLACEMENTS_ID in s["url"]]) == 1
-
-
-@pytest.mark.asyncio
-async def test_bootstrap_preserves_manual_single_tab_link(tmp_path: Path):
-    path = tmp_path / "db.sqlite"
-    db = Database(path)
-    await db.init()
-    sid = await db.add_source(
-        "September archive", SourceType.REPLACEMENTS, LEGACY_REPLACEMENTS_URL, 100, None, None, "2026-2027", 1
-    )
-
-    await SyncService(db, _settings(path)).bootstrap()
-
-    assert (await db.get_source(sid))["url"] == LEGACY_REPLACEMENTS_URL
-
-
-@pytest.mark.asyncio
-async def test_new_month_workbook_replacements_reach_schedule_and_preserve_snapshot_on_error(
-    tmp_path: Path, monkeypatch
-):
-    path = tmp_path / "db.sqlite"
-    db = Database(path)
-    await db.init()
-    service = SyncService(db, _settings(path))
-    await service.bootstrap()
-    source = next(s for s in await db.list_sources() if s["name"] == OFFICIAL_REPLACEMENTS_NAME)
-    workbook = Workbook()
-    november = workbook.active
-    november.title = "Замена ноябрь 2026"
-    november.append(
-        ["дата", "урок", "Класс", "Предмет", "Отсутствующий учитель", "Основание", "Заменяющий учитель", "Кабинет"]
-    )
-    november.append(["02.11.2026"])
-    november.append(["02.ноя", 4, "11а", "Информатика", "Вакансия", "объединение", "Мулюкова А.В.", 301])
-    september = workbook.create_sheet("Замена сентябрь")
-    september.sheet_state = "hidden"
-    september.append(["дата", "урок", "Класс", "Предмет"])
-    september.append(["30.09.2026", 4, "11а", "История"])
-    workbook.create_sheet("Служебный лист").append(["2026-2027 учебный год"])
-    output = io.BytesIO()
-    workbook.save(output)
-
-    async def fetch_workbook(url):
-        assert google_sheet_parts(url)[1] is None
-        return service._xlsx_sheets(output.getvalue())
-
-    monkeypatch.setattr(service, "fetch_sheets", fetch_workbook)
-    result = await service.sync_source(source["id"])
-    await db.set_publication_state(PublicationState.READY)
-    schedules = ScheduleService(db, _settings(path), CalendarService(db))
-
-    assert result["count"] == 1
-    info = await schedules.day_schedule("11а", None, date(2026, 11, 2))
-    lesson = info["lessons"][0]
-    assert info["state"] == "ready"
-    assert lesson.changed and lesson.subject == "Информатика"
-    assert lesson.teacher == "Мулюкова А.В." and lesson.room == "301"
-    assert await db.replacement_summary() == {"count": 1, "first_date": "2026-11-02", "last_date": "2026-11-02"}
-
-    async def unavailable(_url):
-        raise ValueError("Google Sheets временно недоступен")
-
-    monkeypatch.setattr(service, "fetch_sheets", unavailable)
-    with pytest.raises(ValueError, match="временно недоступен"):
-        await service.sync_source(source["id"])
-    assert (await db.get_source(source["id"]))["last_status"] == "error"
-    assert (await schedules.day_schedule("11а", None, date(2026, 11, 2)))["lessons"] == info["lessons"]
 
 
 @pytest.mark.asyncio
@@ -253,3 +149,147 @@ async def test_unchanged_source_does_not_rewrite_snapshot(tmp_path: Path, monkey
 
     result = await service.sync_source(source_id)
     assert result["unchanged"] is True
+
+
+@pytest.mark.asyncio
+async def test_sync_next_round_robins_sources_even_when_db_order_is_by_type(tmp_path: Path, monkeypatch):
+    path = tmp_path / "db.sqlite"
+    db = Database(path)
+    await db.init()
+    weekly_id = await db.add_source("weekly", SourceType.WEEKLY, "unused-weekly", 200, None, None, "2026-2027", 1)
+    replacements_id = await db.add_source(
+        "replacements", SourceType.REPLACEMENTS, "unused-replacements", 200, None, None, "2026-2027", 1
+    )
+    service = SyncService(db, _settings(path))
+    synced = []
+
+    async def fake_sync(source_id):
+        synced.append(source_id)
+        return {"ok": True}
+
+    monkeypatch.setattr(service, "sync_source", fake_sync)
+
+    await service.sync_next()
+    await service.sync_next()
+
+    assert synced == [weekly_id, replacements_id]
+
+
+TAB_LIST = """<script>
+items.push({name: "Замена ноябрь 2026", pageUrl: "https://untrusted.example/", gid: "1397336121",initialSheet: true});
+items.push({name: "Замена декабрь 2026", pageUrl: "ignored", gid: "12345",initialSheet: false});
+items.push({name: "Замена январь 2027", pageUrl: "ignored", gid: "12346",initialSheet: false});
+items.push({name: "Замена ноябрь 2025", pageUrl: "ignored", gid: "12347",initialSheet: false});
+items.push({name: "Замена ноябрь 2026 (копия)", pageUrl: "ignored", gid: "12348",initialSheet: false});
+</script>"""
+
+
+@pytest.mark.asyncio
+async def test_discovers_new_months_without_xlsx_and_preserves_disabled_tabs(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    db = Database(tmp_path / "discovery.sqlite")
+    await db.init()
+    service = SyncService(db, _settings(tmp_path / "discovery.sqlite"))
+    await service.bootstrap()
+    november = next(s for s in await db.list_sources() if s["url"] == OFFICIAL_REPLACEMENTS_URL)
+    await db.set_source_enabled(november["id"], False)
+    fetch = AsyncMock(return_value=TAB_LIST.encode())
+    monkeypatch.setattr(service, "_fetch_bytes", fetch)
+    monkeypatch.setattr(
+        "app.services.sync.now_local", lambda _: datetime(2026, 11, 2, tzinfo=ZoneInfo("Europe/Moscow"))
+    )
+    assert await service.discover_replacement_sources()
+    sources = [s for s in await db.list_sources() if OFFICIAL_REPLACEMENTS_ID in s["url"]]
+    assert len(sources) == 3
+    assert {s["name"] for s in sources} == {
+        "official-replacements-2026-11",
+        "official-replacements-2026-12",
+        "official-replacements-2027-01",
+    }
+    assert not (await db.get_source(november["id"]))["enabled"]
+    assert all(s["url"].startswith("https://docs.google.com/") for s in sources)
+    assert not await service.discover_replacement_sources()
+    fetch.assert_awaited_once()
+    assert "/htmlview" in fetch.await_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_failed_discovery_does_not_block_imports_or_erase_snapshot(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    db = Database(tmp_path / "failed-discovery.sqlite")
+    await db.init()
+    service = SyncService(db, _settings(tmp_path / "failed-discovery.sqlite"))
+    await service.bootstrap()
+    source = next(s for s in await db.list_sources() if s["url"] == OFFICIAL_REPLACEMENTS_URL)
+    await db.replace_source_snapshot(
+        source["id"],
+        SourceType.REPLACEMENTS,
+        [],
+        [
+            ParsedReplacement(date(2026, 11, 2), "11а", 4, "Физика", None, "301"),
+        ],
+    )
+    monkeypatch.setattr(service, "_fetch_bytes", AsyncMock(return_value=b"<html>sign in</html>"))
+    sync = AsyncMock()
+    monkeypatch.setattr(service, "sync_source", sync)
+    assert (await service.sync_next())["skipped"] == 1
+    assert await db.get_state("replacement_discovery_error") == "ValueError"
+    assert (await service.sync_next())["ok"] == 1
+    sync.assert_awaited_once()
+    assert (await db.replacement_summary())["count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_current_replacements_are_prioritized_without_starving_weekly(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    db = Database(tmp_path / "priority.sqlite")
+    await db.init()
+    service = SyncService(db, _settings(tmp_path / "priority.sqlite"))
+    weekly = await db.add_source("weekly", SourceType.WEEKLY, "unused", 200, None, None, "2026-2027", None)
+    another = await db.add_source("weekly2", SourceType.WEEKLY, "unused2", 200, None, None, "2026-2027", None)
+    current = await db.add_source(
+        "official-replacements-2026-11",
+        SourceType.REPLACEMENTS,
+        OFFICIAL_REPLACEMENTS_URL,
+        200,
+        None,
+        None,
+        "2026-2027",
+        None,
+    )
+    monkeypatch.setattr(
+        "app.services.sync.now_local", lambda _: datetime(2026, 11, 2, tzinfo=ZoneInfo("Europe/Moscow"))
+    )
+    monkeypatch.setattr(service, "discover_replacement_sources", AsyncMock(return_value=False))
+    sync = AsyncMock()
+    monkeypatch.setattr(service, "sync_source", sync)
+    for _ in range(6):
+        await service.sync_next()
+    assert [call.args[0] for call in sync.await_args_list] == [current, weekly, current, another, current, weekly]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_is_cached_and_does_not_consume_source_ids(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    db = Database(tmp_path / "bootstrap.sqlite")
+    await db.init()
+    service = SyncService(db, _settings(tmp_path / "bootstrap.sqlite"))
+    await service.bootstrap()
+    bootstrap = AsyncMock(wraps=db.bootstrap_source)
+    monkeypatch.setattr(db, "bootstrap_source", bootstrap)
+    await service.bootstrap()
+    bootstrap.assert_not_awaited()
+    async with db.connect() as connection:
+        before = await (
+            await connection.execute("SELECT seq FROM sqlite_sequence WHERE name='data_sources'")
+        ).fetchone()
+    await db.bootstrap_source(
+        "official-replacements-2026-11", SourceType.REPLACEMENTS, OFFICIAL_REPLACEMENTS_URL, "2026-2027"
+    )
+    async with db.connect() as connection:
+        after = await (await connection.execute("SELECT seq FROM sqlite_sequence WHERE name='data_sources'")).fetchone()
+    assert before["seq"] == after["seq"]
