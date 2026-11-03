@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-from datetime import date
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 from ..config import Settings
@@ -16,6 +16,7 @@ from .calendar import CalendarService
 from .schedule import ScheduleService
 
 logger = logging.getLogger(__name__)
+DAY_OFF_NOTICE_HOUR = 19
 
 if TYPE_CHECKING:
     from aiogram import Bot
@@ -33,9 +34,12 @@ class NotificationService:
             await self.dispatch_outbox(bot, limit=min(user_limit or 20, 20))
             return
         now = now_local(self.settings.timezone)
-        if not (await self.calendar.school_day_info(now.date()))[0]:
-            # Do not scan all pupils or render schedules during school breaks.
-            # Outbox still processes administrative broadcasts and drops stale notices.
+        tomorrow = now.date() + timedelta(days=1)
+        evening_notice = now.hour >= DAY_OFF_NOTICE_HOUR and self.calendar.has_day_off_occasion(tomorrow)
+        school_today = (await self.calendar.school_day_info(now.date()))[0]
+        if not school_today and not evening_notice:
+            # Skip academic work on days off. Greetings can run on Sundays and
+            # during vacations too, e.g. before March 8 or New Year.
             await self.dispatch_outbox(bot, limit=min(user_limit or 20, 20))
             return
         if user_limit is None:
@@ -55,10 +59,21 @@ class NotificationService:
             # leave the cursor stuck on one user forever. Failed users return next cycle.
             await self.db.set_state("notification_cursor", str(users[-1]["user_id"]) if users else "0")
         cache = {}
+        day_off_notices = {}
         for u in users:
             if u["academic_year"] != self.settings.academic_year or not u["class_name"]:
                 continue
             try:
+                if evening_notice:
+                    class_name = u["class_name"]
+                    if class_name not in day_off_notices:
+                        day_off_notices[class_name] = await self.calendar.day_off_notice(tomorrow, class_name)
+                    if text := day_off_notices[class_name]:
+                        # Stable per pupil/date: text edits and restarts cannot
+                        # enqueue another greeting for the same occasion.
+                        await self._queue(int(u["user_id"]), f"dayoff:{tomorrow.isoformat()}", text)
+                if not school_today:
+                    continue
                 key = (u["class_name"], u["profile"])
                 if key not in cache:
                     cache[key] = await self.schedules.day_schedule(*key, now.date())
@@ -119,19 +134,23 @@ class NotificationService:
 
     async def dispatch_outbox(self, bot: Bot, limit: int = 1) -> None:
         """Send queued notices; retry temporary delivery failures from D1."""
-        today = now_local(self.settings.timezone).date()
+        now = now_local(self.settings.timezone)
+        today = now.date()
+        tomorrow = today + timedelta(days=1)
         school_days = {}
+        day_off_notices = {}
         publication = None
         for item in await self.db.pending_notifications(limit):
             user_id = int(item["user_id"])
             key = item["notification_key"]
             kind, _, rest = key.partition(":")
-            if kind in {"lesson", "morning", "change"}:
+            message = item["message"]
+            if kind in {"lesson", "morning", "change", "dayoff"}:
                 try:
                     target_day = date.fromisoformat(rest.partition(":")[0])
                 except ValueError:
                     target_day = None
-                if target_day != today:
+                if target_day != (tomorrow if kind == "dayoff" else today):
                     await self.db.discard_notification(user_id, key)
                     continue
                 if publication is None:
@@ -141,13 +160,33 @@ class NotificationService:
                     await self.db.discard_notification(user_id, key)
                     continue
                 class_name = user["class_name"]
-                if class_name not in school_days:
-                    school_days[class_name] = (await self.calendar.school_day_info(today, class_name))[0]
-                if publication != PublicationState.READY or not school_days[class_name]:
+                if publication != PublicationState.READY:
                     await self.db.discard_notification(user_id, key)
                     continue
+                if kind == "dayoff":
+                    if now.hour < DAY_OFF_NOTICE_HOUR or not any(
+                        user[field] for field in ("notifications", "morning_summary", "replacement_notifications")
+                    ):
+                        await self.db.discard_notification(user_id, key)
+                        continue
+                    if class_name not in day_off_notices:
+                        day_off_notices[class_name] = await self.calendar.day_off_notice(tomorrow, class_name)
+                    message = day_off_notices[class_name]
+                    if not message:
+                        await self.db.discard_notification(user_id, key)
+                        continue
+                else:
+                    if class_name not in school_days:
+                        school_days[class_name] = (await self.calendar.school_day_info(today, class_name))[0]
+                    if not school_days[class_name]:
+                        await self.db.discard_notification(user_id, key)
+                        continue
+            # A durable lease keeps overlapping Cron invocations from sending
+            # the same queued message concurrently. A crashed sender can retry.
+            if not await self.db.claim_notification(user_id, key):
+                continue
             try:
-                await send_chunks(bot, user_id, item["message"])
+                await send_chunks(bot, user_id, message)
             except Exception as exc:
                 if getattr(exc, "error_code", None) == 403 or "bot was blocked" in str(exc).lower():
                     await self.db.discard_notification(user_id, key)

@@ -87,3 +87,24 @@ async def test_d1_invalid_snapshot_rolls_back_deletion():
         assert row["subject"] == "Математика"
     finally:
         binding.connection.close()
+
+
+@pytest.mark.asyncio
+async def test_d1_notification_lease_allows_one_sender_and_retry_after_expiry():
+    binding = D1Binding()
+    try:
+        db = Database(Path("unused"), d1_binding=binding)
+        await db.enqueue_notification(42, "dayoff:2026-11-04", "Поздравление")
+        assert await db.claim_notification(42, "dayoff:2026-11-04")
+        assert not await db.claim_notification(42, "dayoff:2026-11-04")
+        assert not await db.pending_notifications(20)
+        # A crashed sender's lease expires; another Cron can resume delivery.
+        binding.connection.execute("UPDATE notification_outbox SET next_attempt_at='2000-01-01T00:00:00+00:00'")
+        binding.connection.commit()
+        assert await db.claim_notification(42, "dayoff:2026-11-04")
+        await db.finish_notification(42, "dayoff:2026-11-04")
+        await db.enqueue_notification(42, "dayoff:2026-11-04", "Повторное поздравление")
+        assert await db.notification_sent(42, "dayoff:2026-11-04")
+        assert not await db.pending_notifications(20)
+    finally:
+        binding.connection.close()

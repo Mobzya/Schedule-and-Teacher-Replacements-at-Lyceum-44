@@ -782,6 +782,20 @@ class Database:
             )
             return await cur.fetchall()
 
+    async def claim_notification(self, user_id: int, key: str) -> bool:
+        """Lease one due notice so concurrent senders cannot both deliver it."""
+        now = datetime.now(UTC)
+        async with self.connect() as db:
+            cur = await db.execute(
+                """UPDATE notification_outbox SET next_attempt_at=?
+                   WHERE user_id=? AND notification_key=? AND next_attempt_at<=?
+                   RETURNING notification_key""",
+                ((now + timedelta(minutes=2)).isoformat(), user_id, key, now.isoformat()),
+            )
+            claimed = await cur.fetchone() is not None
+            await db.commit()
+            return claimed
+
     async def finish_notification(self, user_id: int, key: str) -> None:
         async with self.connect() as db:
             await db.execute("BEGIN" if self.database_url or self.d1_binding is not None else "BEGIN IMMEDIATE")

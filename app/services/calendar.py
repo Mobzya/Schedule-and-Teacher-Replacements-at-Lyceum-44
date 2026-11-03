@@ -23,6 +23,28 @@ _BREAKS = (
     (date(2027, 3, 22), date(2027, 3, 28), "Весенние каникулы"),
     (date(2027, 5, 27), date(2027, 8, 31), "Летние каникулы"),
 )
+_FIRST_GRADE_BREAK = (date(2027, 2, 20), date(2027, 2, 28))
+_BREAK_STARTS = frozenset(start for start, _, _ in _BREAKS) | {_FIRST_GRADE_BREAK[0]}
+# Ready-made Russian forms avoid guessing the gender/case of a holiday name.
+_BREAK_GREETINGS = {
+    "Осенние каникулы": "Поздравляю с началом осенних каникул! 🍂",
+    "Зимние каникулы": "Поздравляю с началом зимних каникул! ❄️",
+    "Весенние каникулы": "Поздравляю с началом весенних каникул! 🌷",
+    "Летние каникулы": "Поздравляю с началом летних каникул! ☀️",
+}
+# Only the occasion itself: no daily greetings throughout New Year holidays
+# or on transferred/ordinary weekends. Holidays during a school break still count.
+_HOLIDAY_GREETINGS = {
+    (1, 1): "Поздравляю с наступающим Новым годом! 🎄",
+    (1, 7): "Поздравляю с наступающим Рождеством! ✨",
+    (2, 23): "Поздравляю с наступающим Днём защитника Отечества! 🎉",
+    (3, 8): "Поздравляю с наступающим Международным женским днём! 🌷",
+    (5, 1): "Поздравляю с наступающим Праздником Весны и Труда! 🌿",
+    (5, 9): "Поздравляю с наступающим Днём Победы! 🕊️",
+    (6, 12): "Поздравляю с наступающим Днём России! 🇷🇺",
+    (6, 24): "Поздравляю с наступающим Днём Чувашской Республики! 🌸",
+    (11, 4): "Поздравляю с наступающим Днём народного единства! 🇷🇺",
+}
 # The installed holidays release does not contain the approved 2027 transfers.
 _ADDITIONAL_DAYS_OFF = {
     date(2026, 12, 31): "Перенесённый выходной",
@@ -56,7 +78,7 @@ class CalendarService:
                 if start.month == 5 and _grade(class_name) in (9, 11):
                     note = "Регулярные уроки завершены. Экзамены — по отдельному расписанию ГИА."
                 return False, None, note
-        if _grade(class_name) == 1 and date(2027, 2, 20) <= day <= date(2027, 2, 28):
+        if _grade(class_name) == 1 and _FIRST_GRADE_BREAK[0] <= day <= _FIRST_GRADE_BREAK[1]:
             return False, None, "Дополнительные каникулы первых классов"
         if day in _ADDITIONAL_DAYS_OFF:
             return False, None, _ADDITIONAL_DAYS_OFF[day]
@@ -65,3 +87,27 @@ class CalendarService:
         if day.weekday() >= 5:
             return False, None, "Выходной"
         return True, day.weekday(), None
+
+    @staticmethod
+    def has_day_off_occasion(day: date) -> bool:
+        """Cheap date check before scanning pupils in a Cloudflare Cron tick."""
+        return day in _BREAK_STARTS or (day.month, day.day) in _HOLIDAY_GREETINGS
+
+    async def day_off_notice(self, day: date, class_name: str) -> str | None:
+        """Return a greeting only for a confirmed day off and a known occasion."""
+        if not self.has_day_off_occasion(day) or (await self.school_day_info(day, class_name))[0]:
+            return None
+        greeting = None
+        for start, _, name in _BREAKS:
+            if day == start:
+                if start.month == 5 and _grade(class_name) in (9, 11):
+                    return (
+                        "<b>Завтра регулярных уроков нет.</b>\n"
+                        "Поздравляю с окончанием учебных занятий! Удачи на экзаменах 🍀"
+                    )
+                greeting = _BREAK_GREETINGS[name]
+                break
+        if day == _FIRST_GRADE_BREAK[0] and _grade(class_name) == 1:
+            greeting = "Поздравляю с началом дополнительных каникул! Хорошего отдыха ❄️"
+        greeting = greeting or _HOLIDAY_GREETINGS.get((day.month, day.day))
+        return f"<b>Завтра уроков нет.</b>\n{greeting}" if greeting else None

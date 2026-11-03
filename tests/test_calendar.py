@@ -79,3 +79,65 @@ async def test_override_has_priority_over_official_vacation(tmp_path):
     assert await calendar.school_day_info(day, "10а") == (True, 2, "Разовое занятие по среде")
     await db.clear_calendar_day(day)
     assert await calendar.school_day_info(day, "10а") == (False, None, "Осенние каникулы")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "day,class_name,phrase",
+    [
+        ("2026-11-04", "10а", "с наступающим Днём народного единства"),
+        ("2027-01-01", "10а", "с наступающим Новым годом"),
+        ("2027-01-07", "10а", "с наступающим Рождеством"),
+        ("2027-02-23", "10а", "с наступающим Днём защитника Отечества"),
+        ("2027-03-08", "10а", "с наступающим Международным женским днём"),
+        ("2027-05-01", "10а", "с наступающим Праздником Весны и Труда"),
+        ("2027-05-09", "10а", "с наступающим Днём Победы"),
+        ("2027-06-12", "10а", "с наступающим Днём России"),
+        ("2027-06-24", "10а", "с наступающим Днём Чувашской Республики"),
+        ("2026-10-24", "10а", "с началом осенних каникул"),
+        ("2026-12-26", "10а", "с началом зимних каникул"),
+        ("2027-03-22", "10а", "с началом весенних каникул"),
+        ("2027-05-27", "10а", "с началом летних каникул"),
+        ("2027-02-20", "1а", "с началом дополнительных каникул"),
+        ("2027-05-27", "9а", "Удачи на экзаменах"),
+        ("2027-05-27", "11а", "Удачи на экзаменах"),
+    ],
+)
+async def test_day_off_notice_uses_correct_russian_forms_and_class_calendar(tmp_path, day, class_name, phrase):
+    db = Database(tmp_path / "greetings.sqlite")
+    await db.init()
+    text = await CalendarService(db).day_off_notice(date.fromisoformat(day), class_name)
+    assert "Завтра" in text and "уроков нет" in text
+    assert phrase in text
+    assert len(text) < 200
+    assert len(text.splitlines()) == 2
+    if class_name in {"9а", "11а"}:
+        assert "каникул" not in text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "day,class_name",
+    [
+        ("2026-11-03", "10а"),  # ordinary school day
+        ("2026-11-07", "10а"),  # ordinary Saturday
+        ("2026-10-05", "10а"),  # Teacher's Day still has lessons
+        ("2026-10-25", "10а"),  # vacation has already started
+        ("2027-01-02", "10а"),  # no daily New Year congratulations
+        ("2027-02-22", "10а"),  # transferred day off, not the holiday itself
+        ("2027-02-20", "11а"),  # extra vacation is for first grade only
+    ],
+)
+async def test_day_off_notice_is_limited_to_first_vacation_day_and_actual_holidays(tmp_path, day, class_name):
+    db = Database(tmp_path / "no-greetings.sqlite")
+    await db.init()
+    assert await CalendarService(db).day_off_notice(date.fromisoformat(day), class_name) is None
+
+
+@pytest.mark.asyncio
+async def test_day_off_notice_respects_schoolday_override(tmp_path):
+    db = Database(tmp_path / "schoolday.sqlite")
+    await db.init()
+    day = date(2026, 11, 4)
+    await db.set_calendar_day(day, True, 2, "Учимся по среде", 1)
+    assert await CalendarService(db).day_off_notice(day, "10а") is None
